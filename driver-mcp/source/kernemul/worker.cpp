@@ -6,6 +6,7 @@
 #include "emu/guest_emu.hpp"
 #include "pe_image.hpp"
 #include "execution_engine.hpp"
+#include "contract_analysis.hpp"
 #include <spdlog/sinks/base_sink.h>
 #include <algorithm>
 #include <charconv>
@@ -124,6 +125,38 @@ struct runtime {
             {"numeric_syscall_dispatch",true},{"syscall_mapping_required",true},{"upstream_revision",EVOKE_KERNEMUL_REVISION}};
     }
 #include "image_runtime.inc"
+    json discover_contract(const json& args) {
+        fields(args,{"image_hex","image_path","base_address","instruction_limit","trace_limit","execution_timeout_ms","timeout_ms","analysis_instruction_limit"});
+        const auto raw=image_input(args,"image_hex","image_path",2*1024*1024);
+        const evoke_pe::image image(raw,false);
+        const auto analysis_limit=args.contains("analysis_instruction_limit")?number(args.at("analysis_instruction_limit")):8192;
+        if(!analysis_limit||analysis_limit>32768)throw std::invalid_argument("invalid_analysis_instruction_limit");
+        json observations={{"dispatch_routines",json::array()},{"namespace_events",json::array()}};
+        json execution_args=args;execution_args.erase("analysis_instruction_limit");execution_args["kind"]="driver";
+        // Snapshot once: discovery and emulation must refer to the exact same source bytes.
+        execution_args.erase("image_path");execution_args["image_hex"]=encode(raw);
+        json initialization;
+        try {initialization=execute_image(execution_args,&observations);}
+        catch(const std::exception& error){initialization={{"status","initialization_unavailable"},{"error",error.what()}};}
+        std::vector<evoke_contract::dispatch_root> roots;
+        for(const auto& r:observations["dispatch_routines"])if(r.contains("rva"))
+            roots.push_back({r.at("major").get<unsigned>(),r.at("rva").get<std::uint32_t>(),"guest_driver_object"});
+        auto report=evoke_contract::analyze(image,raw,roots,static_cast<unsigned>(analysis_limit));
+        json imports=json::array();
+        try {for(const auto& imp:image.imports()) {
+            auto module=module_name(imp.module);if(module=="ntkrnlmp.exe")module="ntoskrnl.exe";
+            imports.push_back({{"module",imp.module},{"name",imp.name},{"iat_rva",imp.slot},
+                {"modeled",handlers.contains({module=="ntdll.dll"?"ntoskrnl.exe":module,imp.name})}});
+        }}catch(const std::exception& error){report["import_analysis_error"]=error.what();}
+        report["imports"]=std::move(imports);report["status"]="completed";report["tool"]="discover_driver_contract";
+        report["source"]="kernemul_and_capstone";report["source_input"]=args.contains("image_path")?"host_file":"supplied_hex";
+        report["observations"]=std::move(observations);
+        const bool returned=initialization.value("status",std::string())=="completed";
+        report["initialization_succeeded"]=returned&&static_cast<std::int32_t>(number(initialization.at("entry_return_value")))>=0;
+        report["initialization"]=std::move(initialization);report["live_system_modified"]=false;
+        report["contract_version"]=1;report["upstream_revision"]=EVOKE_KERNEMUL_REVISION;
+        return report;
+    }
     struct buffer {std::uint64_t addr;std::vector<std::uint8_t> bytes;};
     json run(const json& args) {
         fields(args,{"context","buffers","operations","patches","reads","timeout_ms"});
@@ -191,7 +224,9 @@ struct runtime {
             const auto found=handlers.find({module,name});
             if(found==handlers.end()) {trace.push_back(event);status="unsupported_operation";break;}
             const auto& h=found->second;const auto& arguments=call.at("arguments");
-            if(!arguments.is_array()||arguments.size()>16||arguments.size()<h.arguments)throw std::invalid_argument("invalid_operation_arguments");
+            if(!arguments.is_array()||arguments.size()>16||arguments.size()<h.arguments)
+                throw std::invalid_argument("invalid_operation_arguments: "+module+"!"+name+" requires "+std::to_string(h.arguments)+
+                    ", received "+std::to_string(arguments.size())+" ("+arguments.type_name()+")");
             for(std::size_t i=0;i<16;++i)conv->write_arg(*cpu,i,0);
             json values=json::array();
             for(std::size_t i=0;i<arguments.size();++i) {const auto value=resolve(arguments[i]);conv->write_arg(*cpu,i,value);values.push_back(hex(value));}
@@ -245,6 +280,7 @@ int process_request(const std::filesystem::path& input_path,const std::filesyste
         const auto action=request.at("action").get<std::string>();
         if(action=="catalog")out=machine.catalog(request.at("arguments"));
         else if(action=="image")out=machine.execute_image(request.at("arguments"));
+        else if(action=="discover_contract")out=machine.discover_contract(request.at("arguments"));
         else if(action=="run")out=machine.run(request.at("arguments"));
         else throw std::invalid_argument("unknown_worker_action");
     } catch(const std::exception& error) {out={{"status","worker_error"},{"error",error.what()},{"source","kernemul"}};}

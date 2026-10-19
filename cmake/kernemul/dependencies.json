@@ -34,5 +34,11 @@
     "commit": "6fa36017cfd5731d617e1a934f0e5ea9c4445b13",
     "url": "https://codeload.github.com/gabime/spdlog/tar.gz/6fa36017cfd5731d617e1a934f0e5ea9c4445b13",
     "sha256": "5097fb362e79a2bd7247beaf1f8377ed60e274fbe83a4b33e7b73383f0279022"
+  },
+  "capstone": {
+    "repo": "capstone-engine/capstone",
+    "version": "5.0.6",
+    "url": "https://codeload.github.com/capstone-engine/capstone/tar.gz/refs/tags/5.0.6",
+    "sha256": "240ebc834c51aae41ca9215d3190cc372fd132b9c5c8aa2d5f19ca0c325e28f9"
   }
 }

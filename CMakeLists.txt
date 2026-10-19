@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(evoke_mcp VERSION 2.5.0 LANGUAGES C CXX)
+project(evoke_mcp VERSION 2.6.0 LANGUAGES C CXX)
 
 if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
@@ -26,12 +26,16 @@ add_library(evoke_core
     driver-mcp/source/mcp/emulation_service.cpp
     driver-mcp/source/mcp/api_models.cpp
     driver-mcp/source/mcp/host_system.cpp
-    driver-mcp/source/mcp/windows_service.cpp)
+    driver-mcp/source/mcp/windows_service.cpp
+    driver-mcp/source/mcp/system_drivers.cpp)
 add_dependencies(evoke_core evoke-kernemul)
 target_compile_features(evoke_core PUBLIC cxx_std_20)
 target_compile_definitions(evoke_core PUBLIC $<$<PLATFORM_ID:Windows>:NOMINMAX>)
 target_include_directories(evoke_core PUBLIC driver-mcp/source/mcp)
 target_link_libraries(evoke_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads unicorn)
+if(WIN32)
+    target_link_libraries(evoke_core PUBLIC advapi32)
+endif()
 
 if(WIN32)
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -58,6 +62,15 @@ if(BUILD_TESTING)
     target_link_libraries(image_tests PRIVATE evoke_core)
     add_test(NAME image_tests COMMAND image_tests)
     set_tests_properties(image_tests PROPERTIES TIMEOUT 120)
+    add_executable(contract_tests tests/contract_tests.cpp)
+    target_link_libraries(contract_tests PRIVATE evoke_core)
+    add_test(NAME contract_tests COMMAND contract_tests)
+    set_tests_properties(contract_tests PROPERTIES TIMEOUT 120)
+    add_executable(contract_analysis_tests tests/contract_analysis_tests.cpp driver-mcp/source/kernemul/contract_analysis.cpp)
+    target_compile_features(contract_analysis_tests PRIVATE cxx_std_20)
+    target_include_directories(contract_analysis_tests PRIVATE driver-mcp/source/kernemul)
+    target_link_libraries(contract_analysis_tests PRIVATE capstone_static OpenSSL::Crypto nlohmann_json::nlohmann_json)
+    add_test(NAME contract_analysis_tests COMMAND contract_analysis_tests)
     add_executable(windows_tests tests/windows_tests.cpp)
     target_link_libraries(windows_tests PRIVATE evoke_core)
     add_test(NAME windows_tests COMMAND windows_tests)

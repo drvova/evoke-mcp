@@ -1,4 +1,4 @@
-    json execute_image(const json& args) {
+    json execute_image(const json& args, json* observations=nullptr) {
         fields(args,{"image_hex","image_path","kind","base_address","entry_rva","arguments","registers","watch","syscalls","syscall_stubs_hex","syscall_stubs_path","instruction_limit","trace_limit","execution_timeout_ms","timeout_ms"});
         const auto raw=image_input(args,"image_hex","image_path",2*1024*1024);
         evoke_pe::image image(raw);
@@ -83,8 +83,10 @@
         for(const auto& e:image.exports()){mod->exports[e.name]=base+e.rva;mod->symbols.insert(e.name,base+e.rva);}
         proc->register_emulated_module(mod);state.fs.create("C:\\"+mod->name)->write(raw.data(),raw.size());
         const auto until=space->alloc(4096,prot_rx|supervisor);const std::uint8_t trap=0xcc;space->write_mem(until,&trap,1);
+        std::uint64_t driver_address=0;
         if(kind=="driver") {
             const auto driver=state.create_driver(*mod,u"EvokeGuest");conv->write_arg(*cpu,0,driver.driver_object.address());conv->write_arg(*cpu,1,driver.registry_path.address());
+            driver_address=driver.driver_object.address();
         }
         auto resolve=[&](const json& value)->std::uint64_t {
             if(!value.is_object())return number(value);fields(value,{"image_rva"});const auto rva=number(value.at("image_rva"));
@@ -129,7 +131,24 @@
             call["module"]=module;call["name"]=name;
             try {
                 for(std::size_t i=0;i<h->arguments;++i)call["arguments"].push_back(hex(conv->arg<std::uint64_t>(*cpu,i)));
+                // Read names before the handler can change its guest argument registers.
+                json names=json::array();
+                if(observations&&(name=="IoCreateDevice"||name=="IoCreateSymbolicLink")) {
+                    const auto read_name=[&](unsigned argument) {
+                        const auto addr=conv->arg<std::uint64_t>(*cpu,argument);if(!addr)return std::string();
+                        const emu_object<_UNICODE_STRING> str(*space,addr);
+                        if(str.read().Length>1024)throw std::invalid_argument("discovery_name_too_long");
+                        return narrow_wstring(win::read_unicode_string(str));
+                    };
+                    try {if(name=="IoCreateDevice")names.push_back(read_name(2));
+                        else {names.push_back(read_name(0));names.push_back(read_name(1));}}
+                    catch(const std::exception&){names=json::array();}
+                }
                 h->fn(*cpu);call["return_value"]=h->returns_value?json(hex(conv->read_ret(*cpu))):json(nullptr);
+                if(observations&&!names.empty()&&static_cast<std::int32_t>(conv->read_ret(*cpu))>=0) {
+                    auto& events=(*observations)["namespace_events"];if(events.size()<64)
+                        events.push_back({{"api",name},{"names",names},{"evidence","successful_modeled_api_call"}});
+                }
                 if(cpu->pc()==event.pc) {
                     if(syscall) {
                         const auto next=event.pc+event.instruction_size;
@@ -148,6 +167,19 @@
         for(const auto& w:watches) {std::vector<std::uint8_t> after(w.size);space->read_mem(base+w.rva,after.data(),after.size());watch.push_back({{"rva",w.rva},{"before_hex",encode(w.before)},{"after_hex",encode(after)}});}
         for(const auto& [name,id]:registers)regs[name]=hex(cpu->reg(id));regs["rip"]=hex(cpu->pc());
         for(const auto& [id,s]:services)mapping.push_back({{"id",id},{"module",s.module},{"name",s.name},{"source",s.source}});
+        if(observations&&driver_address) {
+            (*observations)["driver_object_address"]=hex(driver_address);
+            try {
+                for(unsigned major=0;major<28;++major) {
+                    const auto address=space->read_mem<std::uint64_t>(driver_address+offsetof(_DRIVER_OBJECT,MajorFunction)+major*8);
+                    if(!address)continue;
+                    json record={{"major",major},{"address",hex(address)},{"evidence","guest_driver_object"}};
+                    if(address>=base&&address-base<image.bytes.size()&&image.is_executable(static_cast<std::uint32_t>(address-base)))record["rva"]=address-base;
+                    else record["unresolved_target"]=true;
+                    (*observations)["dispatch_routines"].push_back(record);
+                }
+            }catch(const std::exception& error){(*observations)["observation_error"]=error.what();}
+        }
         return {{"status",status},{"source","kernemul"},{"image_source",args.contains("image_path")?"host_file":"supplied_hex"},{"kind",kind},{"image_base",hex(base)},{"entry_rva",entry},{"entry_return_value",hex(conv->read_ret(*cpu))},
             {"registers",regs},{"watch",watch},{"imports",resolved_imports},{"api_trace",trace},{"instruction_trace",instructions},{"instructions_observed",engine.observed()},
             {"trace_truncated",engine.observed()>trace_limit},{"fault_address",hex(event.fault_address)},{"interrupt",event.interrupt},

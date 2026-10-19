@@ -15,6 +15,9 @@ json run(windows_service& service,json args) {
     check(value.at("isError")==false,"real handler execution completes");return body(value);
 }
 json op(const char* name,json arguments){return {{"name",name},{"arguments",arguments}};}
+// An explicit initializer-list overload avoids compiler-dependent single-JSON
+// copy/list construction when the only argument is a buffer/result reference.
+json op(const char* name,std::initializer_list<json> arguments){return op(name,json(json::array_t(arguments)));}
 json ptr(const char* name,unsigned offset=0){return {{"buffer",name},{"offset",offset}};}
 json ret(unsigned index){return {{"result",index}};}
 json handle(const char* name){return {{"read_u64",ptr(name)}};}
@@ -48,6 +51,8 @@ void discovery(windows_service& service) {
     check(one.at("filtered_total")==1,"case insensitive module filter");
     check(one.at("operations")[0].at("argument_count")==11,"actual function traits exposed");
     check(one.at("operations")[0].at("syscall_handler")==true,"syscall provenance");
+    const auto free=body(service.catalog({{"name","ExFreePool"}})).at("operations")[0];
+    check(free.at("argument_count")==1&&free.at("returns_value")==false,"void handler ABI metadata preserved");
     check(body(service.catalog({{"name","UnknownFunction"}})).at("filtered_total")==0,"unknown handlers not advertised");
     std::cout<<catalog.at("total_registered")<<" registered handlers; "<<catalog.at("nt_handlers")<<" Nt handlers; "<<catalog.at("zw_aliases")<<" Zw aliases\n";
 }

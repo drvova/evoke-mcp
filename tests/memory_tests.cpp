@@ -310,7 +310,7 @@ namespace {
         check(call({{"jsonrpc","2.0"},{"id",1},{"method","bad"}}).at("error").at("code")==-32601,"unknown method code");
         check(!server.handle({{"jsonrpc","2.0"},{"method","tools/call"},{"params",{{"name","apply_memory_patch"}}}}),"notifications do not execute tools");
         const auto tools=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/list"}}).at("result").at("tools");
-        check(tools.size()==20,"memory and management tools registered");
+        check(tools.size()==22,"memory and management tools registered");
         for(const auto& tool:tools) check(tool.at("name")!="write_memory","blind writes removed");
         auto emulated=call({{"jsonrpc","2.0"},{"id",2},{"method","tools/call"},
             {"params",{{"name","emulate_region"},{"arguments",{{"code_hex","4889c84801d0c3"},{"registers",{{"rcx",7},{"rdx",35}}}}}}}});
@@ -329,6 +329,10 @@ namespace {
             {"params",{{"name","emulate_windows_image"},{"arguments",{{"image_hex",pe_fixture::hex(pe_fixture::image({0xb8,42,0,0,0,0xc3}))},{"kind","application"},{"timeout_ms",10000}}}}}});
         check(image.at("result").at("isError")==false,"PE execution reachable through MCP");
         check(image.at("result").at("structuredContent").at("entry_return_value")=="0x2a","MCP returns real PE execution result");
+        auto contract=call({{"jsonrpc","2.0"},{"id",6},{"method","tools/call"},
+            {"params",{{"name","discover_driver_contract"},{"arguments",{{"image_hex",pe_fixture::hex(pe_fixture::image({0x31,0xc0,0xc3}))},{"timeout_ms",10000}}}}}});
+        check(contract.at("result").at("isError")==false,"driver contract discovery reachable through MCP");
+        check(contract.at("result").at("structuredContent").at("live_adapter_ready")==false,"MCP preserves contract uncertainty");
         check(f.backend.reads==0 && f.backend.writes==0,"emulation does not touch live backend");
         auto r=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/call"},
             {"params",{{"name","prepare_memory_patch"},{"arguments",{{"addr",65536},{"type","u8"},{"value",256}}}}}});

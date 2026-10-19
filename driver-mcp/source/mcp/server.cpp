@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "system_drivers.hpp"
 #include <stdexcept>
 
 namespace mcp_runtime {
@@ -56,7 +57,29 @@ namespace mcp_runtime {
             value["not"] = {{"required", {"syscall_stubs_hex", "syscall_stubs_path"}}};
             return value;
         };
+        auto discovery_schema = image_schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+            {"image_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}}},
+            {"service_name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 256}, {"description", "Windows driver service name; resolves its configured image through read-only SCM queries."}}},
+            {"base_address", emulation_integer},
+            {"analysis_instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 32768}, {"default", 8192}}},
+            {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
+            {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
+            {"execution_timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1000}, {"default", 100}}},
+            {"timeout_ms", {{"type", "integer"}, {"minimum", 100}, {"maximum", 10000}, {"default", 3000}}}
+        });
+        discovery_schema.erase("not");discovery_schema["oneOf"] = json::array();
+        for(auto field:{"image_hex","image_path","service_name"}) {
+            json others=json::array();for(auto other:{"image_hex","image_path","service_name"})if(std::string_view(field)!=other)others.push_back({{"required",{other}}});
+            discovery_schema["oneOf"].push_back({{"required",{field}},{"not",{{"anyOf",others}}}});
+        }
         tools_ = {
+            {"list_system_drivers", "Read Windows kernel/filesystem driver services and their configured binary paths through SCM. Filter by exact service name or paginate. Running service state is reported; association with a particular device is not proven. No loading, starting, stopping or device probing.",
+                schema({{"name",{{"type","string"},{"minLength",1},{"maxLength",256}}},
+                    {"offset",{{"type","integer"},{"minimum",0},{"maximum",4096}}},
+                    {"limit",{{"type","integer"},{"minimum",1},{"maximum",200},{"default",100}}}},json::array()),
+                true, [](const json& args){return list_system_drivers(args);}},
+            {"discover_driver_contract", "Analyze a supplied AMD64 driver using bounded disassembly and modeled DriverEntry execution. Discover registered dispatch routines, IOCTL candidates with IO_STACK_LOCATION dataflow evidence, length comparisons, buffer accesses and device-name hints. Return a SHA-256-bound partial contract with provenance and initialization stop reasons. Does not probe live devices or activate an inferred live adapter.",
+                discovery_schema, true, [this](const json& args) { return windows_.discover_contract(args); }},
             {"emulate_windows_image", "Load and execute a supplied AMD64 PE entry point or routine in the bounded KernEmul guest. Resolve named imports to original handlers; trap numeric syscalls using explicit mappings or matching supplied ntdll stubs. Return registers, traces and watched guest bytes. DriverEntry gets modeled driver arguments. No native image loading or live-driver execution; unsupported imports/features stop explicitly.",
                 image_schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
                     {"image_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}, {"description", "Server-local regular PE file; mutually exclusive with image_hex. Read inside the bounded worker."}}},
@@ -199,7 +222,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.5.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.6.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

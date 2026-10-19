@@ -1,4 +1,5 @@
 #include "windows_service.hpp"
+#include "system_drivers.hpp"
 #include <chrono>
 #include <fstream>
 #include <random>
@@ -113,12 +114,25 @@ json windows_service::info(const json& args) {
         {"operation_discovery","list_windows_operations"},{"execution","emulate_windows_operations"},
         {"state_lifetime","this_request"},{"max_operations",64},{"max_buffers",32},{"max_buffer_bytes",16384},
         {"max_total_buffer_bytes",65536},{"max_timeout_ms",10000},{"default_timeout_ms",3000},
-        {"numeric_syscall_dispatch",true},{"pe_execution",true},{"image_execution","emulate_windows_image"},{"max_image_bytes",2097152},{"max_image_request_bytes",16777216},{"max_syscall_stub_bytes",4194304},{"live_system_modified",false},
+        {"numeric_syscall_dispatch",true},{"pe_execution",true},{"image_execution","emulate_windows_image"},{"contract_discovery","discover_driver_contract"},{"system_driver_discovery","list_system_drivers"},{"max_image_bytes",2097152},{"max_image_request_bytes",16777216},{"max_syscall_stub_bytes",4194304},{"live_system_modified",false},
         {"limitations","Original upstream Windows models in a headless guest. Nt/Zw handlers are called by name. PE execution supports supplied AMD64 images, modeled named imports, and explicit or supplied-stub syscall mappings. No guest scheduler or synchronous guest callback execution. Upstream approximations and unsupported branches remain; handled does not mean NTSTATUS success. Not an OS sandbox."}});
 }
 json windows_service::catalog(const json& args){return invoke("catalog",args);}
 json windows_service::run(const json& args){return invoke("run",args);}
 json windows_service::image(const json& args){return invoke("image",args);}
+json windows_service::discover_contract(const json& args){
+    if(!args.is_object())throw std::invalid_argument("arguments_must_be_object");
+    const auto inputs=unsigned(args.contains("image_hex"))+unsigned(args.contains("image_path"))+unsigned(args.contains("service_name"));
+    if(inputs!=1)throw std::invalid_argument("provide_exactly_one_driver_input");
+    if(!args.contains("service_name"))return invoke("discover_contract",args);
+    try {
+        const auto driver=resolve_system_driver(args.at("service_name").get<std::string>());
+        auto resolved=args;resolved.erase("service_name");resolved["image_path"]=driver.at("image_path");
+        auto result=invoke("discover_contract",resolved);
+        auto content=result.at("structuredContent");content["host_driver"]=driver;content["source_input"]="host_service";
+        return make_tool_result("driver_contract_discovery",content,result.at("isError").get<bool>());
+    }catch(const std::exception& error){return make_tool_result("driver_service_resolution_failed",{{"status","driver_service_resolution_failed"},{"error",error.what()},{"live_system_modified",false}},true);}
+}
 json windows_service::invoke(const char* action,const json& args) {
     if(!args.is_object())throw std::invalid_argument("arguments_must_be_object");
     unsigned timeout=3000;
@@ -127,7 +141,7 @@ json windows_service::invoke(const char* action,const json& args) {
         const auto n=args.at("timeout_ms").get<std::int64_t>();if(n<100||n>10000)throw std::invalid_argument("invalid_timeout_ms");timeout=static_cast<unsigned>(n);
     }
     const auto text=json({{"action",action},{"arguments",args}}).dump();
-    if(text.size()>(std::string_view(action)=="image"?16*1024*1024:131072))throw std::invalid_argument("windows_request_too_large");
+    if(text.size()>((std::string_view(action)=="image"||std::string_view(action)=="discover_contract")?16*1024*1024:131072))throw std::invalid_argument("windows_request_too_large");
     std::unique_lock lock(mutex_,std::try_to_lock);
     if(!lock.owns_lock())return make_tool_result("windows_emulation_busy",{{"status","windows_emulation_busy"}},true);
     if(!std::filesystem::is_regular_file(worker_))return make_tool_result("kernemul_worker_unavailable",{{"status","kernemul_worker_unavailable"}},true);

@@ -102,7 +102,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -119,7 +119,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -134,7 +134,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -151,7 +151,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
-      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -162,6 +162,7 @@
     <ClCompile Include="source\mcp\api_models.cpp" />
     <ClCompile Include="source\mcp\host_system.cpp" />
     <ClCompile Include="source\mcp\windows_service.cpp" />
+    <ClCompile Include="source\mcp\system_drivers.cpp" />
     <ClCompile Include="source\mcp\emulation_service.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -175,6 +176,7 @@
     <ClInclude Include="source\mcp\api_models.hpp" />
     <ClInclude Include="source\mcp\host_system.hpp" />
     <ClInclude Include="source\mcp\windows_service.hpp" />
+    <ClInclude Include="source\mcp\system_drivers.hpp" />
     <ClInclude Include="source\mcp\emulation_service.hpp" />
     <ClInclude Include="source\mcp\http_security.hpp" />
     <ClInclude Include="source\mcp\routines\type_dispatch.hpp" />

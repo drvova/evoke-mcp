@@ -11,6 +11,7 @@ namespace mcp_runtime {
         json catalog(const json& args);
         json run(const json& args);
         json image(const json& args);
+        json discover_contract(const json& args);
     private:
         json invoke(const char* action, const json& args);
         std::filesystem::path worker_;

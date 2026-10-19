@@ -4,6 +4,74 @@ A Windows x64 MCP server with built-in Unicorn and KernEmul emulation, driver ma
 typed memory access through a compatible local kernel driver. It exposes
 authenticated Streamable HTTP at `http://127.0.0.1:8888/mcp`.
 
+## Automatic driver-contract discovery
+
+`discover_driver_contract` analyzes a supplied **AMD64 Windows driver** without
+driver source or a driver-specific adapter. It runs DriverEntry in the required
+KernEmul guest, reads the resulting `DRIVER_OBJECT.MajorFunction` table, and
+disassembles reachable initialization and device-control routines with Capstone.
+It also searches initialization code for direct dispatch registrations when a
+missing import or another unsupported feature prevents modeled initialization.
+
+On Windows, `list_system_drivers` enumerates kernel/filesystem **services** using
+read-only SCM APIs. It returns service names, state, configured image paths and
+path-resolution errors. Use its exact `name` filter or `offset` / `limit`
+pagination (default 100, maximum 200). A running service and its configured image
+do not prove ownership of a particular device or identity with the loaded bytes.
+Neither tool starts, loads, stops, unloads or sends IOCTLs to a live driver.
+
+```json
+{
+  "name": "discover_driver_contract",
+  "arguments": {
+    "service_name": "MyDriverService",
+    "timeout_ms": 10000
+  }
+}
+```
+
+Supply exactly one of `service_name` (Windows only), `image_path` (server-local
+regular file), or `image_hex` (raw file bytes). The file/hex routes also work on
+Linux. Images retain the PE tool's 2 MiB file / 16 MiB mapped-image bounds.
+Service resolution expands common `\\SystemRoot\\`, `System32\\` and DOS paths;
+unresolved native paths and command lines with arguments are reported explicitly.
+File snapshots are hashed once and the same bytes are used for analysis and
+emulation. Existing image instruction, trace, execution-time and worker-time
+limits apply. `analysis_instruction_limit` separately bounds disassembly to
+8,192 instructions by default, at most 32,768; pending blocks and evidence arrays
+are also bounded. The worker keeps its resource limits and 1 MiB response bound.
+
+The versioned report includes:
+
+- `source_sha256`: identity of the analyzed file, including nonexecuted bytes.
+- `dispatch_routines`: image-relative targets, major-function numbers and whether
+  they came from guest object memory or an initialization-code store.
+- `ioctl_candidates`: comparisons whose operands trace back to
+  `IO_STACK_LOCATION.Parameters.DeviceIoControl.IoControlCode`, with comparison
+  RVAs, dispatch evidence, decoded device/function/method/access bits and explicit
+  candidate status. Arithmetic equality dispatch patterns are also recognized.
+- `length_comparisons` and `buffer_accesses`: observed instruction operands and
+  accesses through tracked system/user/type-3 buffer pointers. A comparison alone
+  does not prove a minimum size or the branch that accepts a request.
+- `device_path_hints`: embedded ASCII/UTF-16 names, distinguished from successful
+  modeled `IoCreateDevice` / `IoCreateSymbolicLink` calls in
+  `observations.namespace_events`.
+- `initialization`: actual stop reason, raw return value, registers and traces,
+  including unresolved imports. `initialization_succeeded` additionally checks
+  the returned NTSTATUS; discovery can still complete with partial evidence.
+
+This is a **general discovery framework, not guaranteed universal ABI recovery**.
+It currently follows AMD64 WDM IRP field layouts, direct branches/calls, register
+copies and simple pointer/IOCTL arithmetic. Stack spills, indirect jump tables,
+WDF-generated dispatch, encrypted code, nested pointer meanings and hardware
+state can remain unresolved. Branch feasibility is not proven. An embedded name
+is only a hint; an IOCTL comparison is not proof of an accepted operation.
+Reports retain `discovery_status: "partial"`, `buffer_layout_complete: false` and
+`live_adapter_ready: false`. They supply evidence an agent can investigate and
+use to build a driver-specific adapter; they do not invent operation semantics or
+activate live calls from inferred layouts. Only the existing Evoke live adapter
+ships. Worker resource limits are not an OS sandbox.
+
 ## Built-in code-region emulation
 
 Unicorn **is a required dependency in every build**. The `get_emulation_info` and
