@@ -4,6 +4,8 @@
 #endif
 #include <unicorn/unicorn.h>
 #include <unicorn/x86.h>
+#include "api_models.hpp"
+#include <chrono>
 
 #include <algorithm>
 #include <array>
@@ -66,8 +68,8 @@ namespace mcp_runtime {
         }
         std::size_t limit(const json& args, const char* name, std::size_t fallback, std::size_t maximum) {
             if (args.contains(name) && !args.at(name).is_number_integer())
-            throw std::invalid_argument(std::string("integer_required_for_") + name);
-        const auto value = args.contains(name) ? number(args.at(name)) : fallback;
+                throw std::invalid_argument(std::string("integer_required_for_") + name);
+            const auto value = args.contains(name) ? number(args.at(name)) : fallback;
             if (!value || value > maximum) throw std::invalid_argument(std::string("invalid_") + name);
             return static_cast<std::size_t>(value);
         }
@@ -146,6 +148,10 @@ namespace mcp_runtime {
             bool has_fault = false;
             memory_event fault{};
             std::uint32_t interrupt = 0;
+            const std::vector<api_binding>* imports = nullptr;
+            const std::vector<region>* regions = nullptr;
+            std::size_t first_import_region = 0;
+            std::size_t pending_api = std::numeric_limits<std::size_t>::max();
         };
         // Hook buffers are reserved and events contain no allocating fields. Never
         // allocate JSON or propagate C++ exceptions through Unicorn's C callbacks.
@@ -156,6 +162,21 @@ namespace mcp_runtime {
             const auto bytes = std::min<std::size_t>(size, event.bytes.size());
             if (bytes) uc_mem_read(engine, addr, event.bytes.data(), bytes);
             if (state.instructions.size() < state.maximum) state.instructions.push_back(event);
+            for (std::size_t index = 0; index < state.imports->size(); ++index) {
+                if (state.imports->at(index).address == addr) {
+                    state.pending_api = index;
+                    uc_emu_stop(engine);
+                    return;
+                }
+            }
+            for (std::size_t index = state.first_import_region; index < state.regions->size(); ++index) {
+                const auto& range = state.regions->at(index);
+                if (addr >= range.mapped_address && addr - range.mapped_address < range.mapped_size) {
+                    state.stop = "unbound_import_address";
+                    uc_emu_stop(engine);
+                    return;
+                }
+            }
             std::size_t opcode = 0;
             while (opcode < bytes) {
                 const auto prefix = event.bytes[opcode];
@@ -201,20 +222,39 @@ namespace mcp_runtime {
         }
     }
 
+    json emulation_service::api_catalog(const json& args) { return describe_api_models(host_, args); }
+    json emulation_service::system_snapshot(const json& args) {
+        fields(args, {});
+        if (!host_.available()) return make_tool_result("host_windows_apis_unavailable", {
+            {"status", "host_windows_apis_unavailable"}, {"source", "host_snapshot"}, {"provider", std::string(host_.name())}}, true);
+        host_snapshot captured;
+        try { captured = host_.capture(); }
+        catch (const std::exception& error) { return make_tool_result("host_snapshot_failed", {
+            {"status", "host_snapshot_failed"}, {"error", error.what()}, {"source", "host_snapshot"},
+            {"provider", std::string(host_.name())}, {"host_mutation", false}}, true); }
+        auto out = captured.describe();
+        out["source"] = "host_snapshot";
+        out["provider"] = std::string(host_.name());
+        out["host_mutation"] = false;
+        return make_tool_result("system_snapshot", out);
+    }
+
     json emulation_service::info(const json& args) {
         fields(args, {});
         unsigned major = 0, minor = 0;
         uc_version(&major, &minor);
         return make_tool_result("emulation_available", {{"engine", "unicorn"}, {"built_in", true},
             {"api_major", major}, {"api_minor", minor}, {"architecture", "x86_64"},
-            {"kernel_api_model", false}, {"live_driver_access", false},
+            {"kernel_api_model", "explicit_subset"}, {"api_model_count", api_models().size()},
+            {"host_snapshot_available", host_.available()}, {"complete_windows_api_coverage", false}, {"live_driver_access", false},
+            {"maximum_imports", 32}, {"maximum_api_calls", 256}, {"guest_pool_size", api_machine::pool_size},
             {"maximum_code_bytes", 16384}, {"maximum_memory_regions", 8}, {"maximum_region_bytes", 4096},
             {"maximum_instructions", 100000}, {"maximum_timeout_ms", 500}, {"maximum_trace_events", 512},
             {"stack_address", hex_number(stack_base)}, {"stack_size", stack_size}, {"default_rsp", hex_number(default_rsp)}});
     }
 
     json emulation_service::run(const json& args) {
-        fields(args, {"code_hex"}, {"address", "entry_offset", "registers", "memory", "instruction_limit", "timeout_ms", "trace_limit"});
+        fields(args, {"code_hex"}, {"address", "entry_offset", "registers", "memory", "instruction_limit", "timeout_ms", "trace_limit", "imports"});
         const auto code_address = args.contains("address") ? number(args.at("address")) : 0x100000;
         auto code = make_region(code_address, decode(args.at("code_hex"), 16384), UC_PROT_READ | UC_PROT_EXEC);
         const auto offset = args.contains("entry_offset") ? number(args.at("entry_offset")) : 0;
@@ -247,6 +287,46 @@ namespace mcp_runtime {
                 initial.emplace_back(definition->id, number(item.value()));
             }
         }
+        const auto input_region_count = regions.size();
+        std::vector<api_binding> imports;
+        if (args.contains("imports")) {
+            const auto& entries = args.at("imports");
+            if (!entries.is_array() || entries.size() > 32) throw std::invalid_argument("invalid_import_bindings");
+            imports.reserve(entries.size());
+            for (const auto& entry : entries) {
+                fields(entry, {"module", "name", "address"}, {"backend"});
+                const auto module = entry.at("module").get<std::string>(), name = entry.at("name").get<std::string>();
+                if (module.empty() || name.empty() || module.size() > 128 || name.size() > 128)
+                    throw std::invalid_argument("invalid_import_name");
+                const auto addr = number(entry.at("address"));
+                const auto* model = find_api_model(module, name);
+                if (entry.contains("backend")) {
+                    const auto backend = entry.at("backend").get<std::string>();
+                    if ((backend != "model" && backend != "host_snapshot") ||
+                        (model && backend != (model->host_backed ? "host_snapshot" : "model")))
+                        throw std::invalid_argument("import_backend_mismatch");
+                }
+                for (const auto& previous : imports)
+                    if (previous.address == addr) throw std::invalid_argument("duplicate_import_address");
+                auto stub = make_region(addr, {0xc3}, UC_PROT_READ | UC_PROT_EXEC);
+                bool mapped = false;
+                for (std::size_t index = input_region_count; index < regions.size(); ++index)
+                    if (regions[index].mapped_address == stub.mapped_address) mapped = true;
+                if (!mapped) {
+                    for (const auto& previous : regions) disjoint(stub, previous);
+                    regions.push_back(std::move(stub));
+                }
+                imports.push_back({module, name, addr, model});
+            }
+        }
+        const auto needs_pool = std::any_of(imports.begin(), imports.end(), [](const auto& binding) {
+            return binding.model && (binding.model->kind == api_kind::allocate_legacy || binding.model->kind == api_kind::allocate2 ||
+                binding.model->kind == api_kind::free_pool || binding.model->kind == api_kind::free_tagged);
+        });
+        if (needs_pool) {
+            const region pool{api_machine::pool_base, api_machine::pool_base, api_machine::pool_size, {}, 0};
+            for (const auto& previous : regions) disjoint(pool, previous);
+        }
         std::unique_lock lock(mutex_, std::try_to_lock);
         if (!lock.owns_lock()) return make_tool_result("emulation_busy", {{"status", "emulation_busy"}}, true);
         uc_engine* raw = nullptr;
@@ -260,11 +340,16 @@ namespace mcp_runtime {
             check(uc_mem_map(raw, region.mapped_address, static_cast<std::size_t>(region.mapped_size), region.permissions));
             check(uc_mem_write(raw, region.address, region.data.data(), region.data.size()));
         }
+        for (const auto& binding : imports) {
+            const std::uint8_t ret = 0xc3;
+            check(uc_mem_write(raw, binding.address, &ret, 1));
+        }
         const auto until = code_address + regions[0].data.size();
         check(uc_mem_write(raw, default_rsp, &until, sizeof(until)));
         check(uc_reg_write(raw, UC_X86_REG_RSP, &default_rsp));
         for (const auto& [id, value] : initial) check(uc_reg_write(raw, id, &value));
-        trace_state state{trace_limit, 0, 0, {}, {}, nullptr, false, {}, 0};
+        trace_state state{trace_limit, 0, 0, {}, {}, nullptr, false, {}, 0, &imports, &regions,
+                          input_region_count, std::numeric_limits<std::size_t>::max()};
         state.instructions.reserve(trace_limit);
         state.memory.reserve(trace_limit);
         uc_hook hook{};
@@ -273,21 +358,50 @@ namespace mcp_runtime {
         check(uc_hook_add(raw, &hook, UC_HOOK_MEM_INVALID, reinterpret_cast<void*>(on_fault), &state, 1, 0));
         check(uc_hook_add(raw, &hook, UC_HOOK_INTR, reinterpret_cast<void*>(on_interrupt), &state, 1, 0));
         check(uc_hook_add(raw, &hook, UC_HOOK_INSN_INVALID, reinterpret_cast<void*>(on_invalid), &state, 1, 0));
-        const auto error = uc_emu_start(raw, code_address + offset, until, timeout_ms * 1000, instruction_limit);
-        std::uint64_t rip = 0;
-        check(uc_reg_read(raw, UC_X86_REG_RIP, &rip));
+        api_machine api(raw, host_);
+        json api_trace = json::array();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+        uc_err error = UC_ERR_OK;
+        std::uint64_t rip = code_address + offset;
         std::size_t timed_out = 0;
-        check(uc_query(raw, UC_QUERY_TIMEOUT, &timed_out));
-        const char* status = state.stop ? state.stop : state.has_fault ? "memory_fault" :
-            error != UC_ERR_OK ? "engine_error" : timed_out ? "timeout" :
-            rip == until ? "completed" : state.observed >= instruction_limit ? "instruction_limit" : "stopped";
+        const char* status = nullptr;
+        while (true) {
+            if (rip == until) { status = "completed"; break; }
+            if (state.observed >= instruction_limit) { status = "instruction_limit"; break; }
+            const auto remaining = std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now()).count();
+            if (remaining <= 0) { status = "timeout"; timed_out = 1; break; }
+            state.pending_api = std::numeric_limits<std::size_t>::max();
+            error = uc_emu_start(raw, rip, until, static_cast<std::uint64_t>(remaining), instruction_limit - state.observed);
+            check(uc_reg_read(raw, UC_X86_REG_RIP, &rip));
+            check(uc_query(raw, UC_QUERY_TIMEOUT, &timed_out));
+            if (state.stop) { status = state.stop; break; }
+            if (state.has_fault) { status = "memory_fault"; break; }
+            if (error != UC_ERR_OK) { status = "engine_error"; break; }
+            if (timed_out) { status = "timeout"; break; }
+            if (state.pending_api != std::numeric_limits<std::size_t>::max()) {
+                if (api_trace.size() >= 256) { status = "api_call_limit"; break; }
+                auto event = api.invoke(imports.at(state.pending_api));
+                const auto handled = event.at("ok").get<bool>();
+                api_trace.push_back(std::move(event));
+                if (!handled) {
+                    status = imports.at(state.pending_api).model ? "api_model_error" : "unsupported_api";
+                    break;
+                }
+                check(uc_reg_read(raw, UC_X86_REG_RIP, &rip));
+                continue;
+            }
+            status = rip == until ? "completed" : state.observed >= instruction_limit ? "instruction_limit" : "stopped";
+            break;
+        }
         json out = {{"status", status}, {"engine", "unicorn"}, {"architecture", "x86_64"},
             {"completed", std::string_view(status) == "completed"}, {"rip", hex_number(rip)},
             {"instructions_observed", state.observed}, {"instruction_limit", instruction_limit},
             {"timeout_ms", timeout_ms}, {"timed_out", timed_out != 0},
             {"trace_truncated", state.observed > trace_limit}, {"memory_trace_truncated", state.memory_observed > trace_limit},
             {"registers", json::object()}, {"instruction_trace", json::array()}, {"memory_trace", json::array()},
-            {"memory", json::array()}, {"live_memory_modified", false}};
+            {"memory", json::array()}, {"live_memory_modified", false}, {"host_mutation", false},
+            {"api_trace", api_trace}, {"guest_pool_allocations", api.allocations()},
+            {"host_snapshot", api.snapshot_description()}};
         if (error != UC_ERR_OK) out["engine_error"] = uc_strerror(error);
         if (state.has_fault) out["fault"] = {{"access", access_name(state.fault.access)},
             {"address", hex_number(state.fault.address)}, {"size", state.fault.size}};
@@ -305,7 +419,7 @@ namespace mcp_runtime {
             if (event.access == UC_MEM_WRITE && event.size <= 8) entry["value"] = hex_number(event.value);
             out["memory_trace"].push_back(entry);
         }
-        for (std::size_t index = 2; index < regions.size(); ++index) {
+        for (std::size_t index = 2; index < input_region_count; ++index) {
             auto after = regions[index].data;
             check(uc_mem_read(raw, regions[index].address, after.data(), after.size()));
             out["memory"].push_back({{"address", hex_number(regions[index].address)},

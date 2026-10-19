@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(evoke_mcp VERSION 2.2.0 LANGUAGES C CXX)
+project(evoke_mcp VERSION 2.3.0 LANGUAGES C CXX)
 
 if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
@@ -26,8 +26,11 @@ find_package(Threads REQUIRED)
 add_library(evoke_core
     driver-mcp/source/mcp/server.cpp
     driver-mcp/source/mcp/memory_service.cpp
-    driver-mcp/source/mcp/emulation_service.cpp)
+    driver-mcp/source/mcp/emulation_service.cpp
+    driver-mcp/source/mcp/api_models.cpp
+    driver-mcp/source/mcp/host_system.cpp)
 target_compile_features(evoke_core PUBLIC cxx_std_20)
+target_compile_definitions(evoke_core PUBLIC $<$<PLATFORM_ID:Windows>:NOMINMAX>)
 target_include_directories(evoke_core PUBLIC driver-mcp/source/mcp)
 target_link_libraries(evoke_core PUBLIC nlohmann_json::nlohmann_json Threads::Threads unicorn)
 
@@ -48,4 +51,7 @@ if(BUILD_TESTING)
     add_executable(emulation_tests tests/emulation_tests.cpp)
     target_link_libraries(emulation_tests PRIVATE evoke_core)
     add_test(NAME emulation_tests COMMAND emulation_tests)
+    add_executable(api_tests tests/api_tests.cpp)
+    target_link_libraries(api_tests PRIVATE evoke_core)
+    add_test(NAME api_tests COMMAND api_tests)
 endif()

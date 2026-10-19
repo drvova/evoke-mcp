@@ -309,7 +309,7 @@ namespace {
         check(call({{"jsonrpc","2.0"},{"id",1},{"method","bad"}}).at("error").at("code")==-32601,"unknown method code");
         check(!server.handle({{"jsonrpc","2.0"},{"method","tools/call"},{"params",{{"name","apply_memory_patch"}}}}),"notifications do not execute tools");
         const auto tools=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/list"}}).at("result").at("tools");
-        check(tools.size()==14,"memory and management tools registered");
+        check(tools.size()==16,"memory and management tools registered");
         for(const auto& tool:tools) check(tool.at("name")!="write_memory","blind writes removed");
         auto emulated=call({{"jsonrpc","2.0"},{"id",2},{"method","tools/call"},
             {"params",{{"name","emulate_region"},{"arguments",{{"code_hex","4889c84801d0c3"},{"registers",{{"rcx",7},{"rdx",35}}}}}}}});

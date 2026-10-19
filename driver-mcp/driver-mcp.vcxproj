@@ -159,6 +159,8 @@
     <ClCompile Include="source\entry\main.cpp" />
     <ClCompile Include="source\mcp\server.cpp" />
     <ClCompile Include="source\mcp\memory_service.cpp" />
+    <ClCompile Include="source\mcp\api_models.cpp" />
+    <ClCompile Include="source\mcp\host_system.cpp" />
     <ClCompile Include="source\mcp\emulation_service.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -169,6 +171,8 @@
     <ClInclude Include="source\httplib\httplib.h" />
     <ClInclude Include="source\mcp\memory_backend.hpp" />
     <ClInclude Include="source\mcp\memory_service.hpp" />
+    <ClInclude Include="source\mcp\api_models.hpp" />
+    <ClInclude Include="source\mcp\host_system.hpp" />
     <ClInclude Include="source\mcp\emulation_service.hpp" />
     <ClInclude Include="source\mcp\http_security.hpp" />
     <ClInclude Include="source\mcp\routines\type_dispatch.hpp" />

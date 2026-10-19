@@ -41,13 +41,25 @@ namespace mcp_runtime {
         for (auto name : {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rflags", "fs_base", "gs_base"})
             register_schema["properties"][name] = emulation_integer;
         tools_ = {
-            {"get_emulation_info", "Report the built-in Unicorn x86-64 emulator, limits, default stack, and lack of Windows kernel API modeling. Available without a connected driver.",
+            {"list_api_models", "List named emulated APIs and Windows host-snapshot bridges, with signatures, supported modules, availability, provenance, and fidelity limits. This is an explicit subset, not all Windows APIs.",
+                schema({{"module", {{"type", "string"}}}, {"name", {{"type", "string"}}}}, json::array()), true,
+                [this](const json& args) { return emulation_.api_catalog(args); }},
+            {"get_system_snapshot", "Read actual host Windows time, performance counters, uptime, system information, and memory status through supported Win32 APIs. Read-only; returns explicit unavailability on other hosts.",
+                schema(json::object(), json::array()), true,
+                [this](const json& args) { return emulation_.system_snapshot(args); }},
+            {"get_emulation_info", "Report the built-in Unicorn x86-64 emulator, limits, default stack, and availability of explicit API models and host-snapshot bridges. Available without a connected driver.",
                 schema(json::object(), json::array()), true,
                 [this](const json& args) { return emulation_.info(args); }},
-            {"emulate_region", "Emulate supplied x86-64 bytes with optional registers and guest memory. Return registers, instruction/memory traces, changed guest bytes, and a precise stop reason. No live-driver access; missing memory and external instructions stop execution. Fresh state per call.",
+            {"emulate_region", "Emulate supplied x86-64 bytes with optional registers and guest memory. Return registers, instruction/memory traces, changed guest bytes, and a precise stop reason. Bind named APIs to guest models or read-only Windows snapshots using imports. Unsupported APIs, missing memory and external instructions stop execution; no live-driver access. Fresh state per call.",
                 schema({
                     {"code_hex", {{"type", "string"}, {"minLength", 2}, {"maxLength", 32768}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
                     {"address", emulation_integer}, {"entry_offset", emulation_integer}, {"registers", register_schema},
+                    {"imports", {{"type", "array"}, {"maxItems", 32}, {"items", schema({
+                        {"module", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
+                        {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
+                        {"address", emulation_integer},
+                        {"backend", {{"type", "string"}, {"enum", json::array({"model", "host_snapshot"})}}}
+                    }, {"module", "name", "address"})}}},
                     {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
                     {"timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}, {"default", 100}}},
                     {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
@@ -122,7 +134,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.2.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.3.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

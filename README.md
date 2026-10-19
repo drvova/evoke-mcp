@@ -15,7 +15,8 @@ state and explicitly supplied guest memory. This is useful for inspecting a
 selected routine or code section extracted from a driver binary. The emulator has
 no driver-backend reference: it neither reads nor modifies live kernel/process
 memory, and no driver source is required for the supplied bytes. It does not load
-PE files, resolve imports, supply Windows kernel APIs, or model a complete kernel.
+PE files or model a complete kernel. Named import bindings can use the explicit
+API models and Windows host-snapshot bridges described below.
 
 For example, this computes `7 + 35` and returns `rax: "0x2a"`:
 
@@ -39,6 +40,7 @@ Arguments:
 | `address` | Guest code address; defaults to `0x100000`. High kernel virtual addresses are supported. |
 | `entry_offset` | Byte offset within the supplied code where execution begins; defaults to zero. |
 | `registers` | Initial general-purpose registers, `rflags`, `fs_base`, and `gs_base`. Unknown names are rejected. |
+| `imports` | Up to 32 `{module, name, address, backend?}` bindings to named models or host-snapshot bridges. |
 | `memory` | Up to eight `{address, bytes_hex, permissions}` guest regions, at most 4 KiB of supplied bytes each. Permissions are `r`, `rw` (default), `rx`, or `rwx`. |
 | `instruction_limit` | Maximum instructions: default 10,000, maximum 100,000. |
 | `timeout_ms` | Unicorn execution timeout: default 100 ms, maximum 500 ms. |
@@ -73,6 +75,9 @@ appear as an unmapped instruction fetch; the emulator reports the address and
 does not infer the API name. Partial runs retain their trace and registers with
 `isError: true`. Infinite loops stop at the instruction or execution-time budget.
 These are execution limits, not a hard wall-clock deadline for request setup.
+The same instruction/time budget spans API resumptions, with at most 256 API calls
+per run. Entering a bound API counts as an observed hook entry; the model does not
+execute the API's original machine instructions.
 
 Each call has fresh state; there are no persistent sessions. One emulation runs
 at a time per server, and another emulation request receives `emulation_busy`.
@@ -80,6 +85,101 @@ The translation buffer is configured to 16 MiB (Unicorn may adjust it). Unicorn
 runs in the MCP process and guest memory is separate from host memory; this is
 not an OS sandbox or a full-system virtual machine. See [third-party notices](THIRD_PARTY.md)
 for the required engine's licensing.
+
+## Windows API models and real host data
+
+The MCP supports both guest models and native Windows queries through an explicit
+routing layer. This is **22 supported API models/bridges, not all Windows APIs**.
+No unknown function is automatically forwarded to the host. Windows user-mode
+APIs do not substitute for arbitrary kernel routines or a real driver's protocol.
+
+The agent can discover the exact interface through:
+
+- `list_api_models`: optional `module` and `name` filters; returns supported module
+  names, the Windows x64 parameter/return contract, backend, availability, fidelity,
+  and limitations for each API. Module matching is case-insensitive; API names are
+  case-sensitive. Coverage is declared explicitly with
+  `complete_windows_api_coverage: false`.
+- `get_system_snapshot`: calls actual Windows `GetSystemTimePreciseAsFileTime`,
+  `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetTickCount64`,
+  `GetNativeSystemInfo`, and `GlobalMemoryStatusEx`. Returns time, counters, uptime,
+  processor/page information, and memory status. This is read-only, works without
+  a driver, and reports unavailability on non-Windows hosts. Full-width values
+  are decimal strings. Failure is reported rather than replaced with fake data.
+
+### Routing a guest call
+
+Pass `imports` to `emulate_region` to associate guest function addresses with API
+names. These addresses are mapped as separate executable trampoline pages; they
+cannot overlap supplied code, data, or the stack. Multiple bindings may share a
+trampoline page, but duplicate addresses are rejected. The agent supplies the
+resolved call addresses (and IAT memory if the code uses an IAT); PE import parsing
+and automatic symbol/address discovery are not implemented.
+
+For example, this calls the guest `RtlZeroMemory` model on four supplied bytes:
+
+```json
+{
+  "name": "emulate_region",
+  "arguments": {
+    "code_hex": "48b80000300000000000ffd0c3",
+    "registers": { "rcx": "0x200000", "rdx": 4 },
+    "memory": [{ "address": "0x200000", "bytes_hex": "01020304" }],
+    "imports": [{
+      "module": "ntoskrnl.exe", "name": "RtlZeroMemory",
+      "address": "0x300000", "backend": "model"
+    }]
+  }
+}
+```
+
+The returned guest bytes are `00000000`. Each call is recorded in `api_trace`
+with module/name, address, arguments, `backend`/`source`, result, guest effects,
+status, and limitations. Model writes are API effects rather than CPU memory-hook
+events; inspect `api_trace` and the returned before/after memory. Unknown bound
+APIs stop with `unsupported_api` and their supplied names. Known models with invalid
+arguments, missing/protected guest memory, or unavailable host queries stop with
+`api_model_error`. There is no default-success stub. The optional `backend`
+assertion must match the registered route and never changes an API's semantics.
+Calls are dispatched outside Unicorn's C callbacks, then return through the
+emulated Windows x64 stack. Native host pointers and guest addresses are never
+interchanged, and these handlers never receive the live driver backend.
+
+### Implemented models
+
+| Backend | APIs |
+| --- | --- |
+| Guest memory | `memcpy`, `memmove`, `memset`, `RtlCopyMemory`, `RtlMoveMemory`, `RtlZeroMemory`, `RtlFillMemory`, `RtlCompareMemory` |
+| Guest pool | `ExAllocatePoolWithTag`, `ExAllocatePool2`, `ExFreePool`, `ExFreePoolWithTag` |
+| Host snapshot through kernel-compatible signatures | `KeQuerySystemTime`, `KeQuerySystemTimePrecise`, `KeQueryPerformanceCounter` |
+| Host snapshot through Win32 signatures | `GetSystemTimeAsFileTime`, `GetSystemTimePreciseAsFileTime`, `QueryPerformanceCounter`, `QueryPerformanceFrequency`, `GetTickCount64`, `GetNativeSystemInfo`, `GlobalMemoryStatusEx` |
+
+Guest memory transfers are limited to 64 KiB per call and respect emulated page
+permissions. Copies reject overlapping ranges; moves support them. Pool models
+use a deterministic 1 MiB guest-only pool at `0x50000000`, with allocations up to
+64 KiB, page rounding, tag tracking, freeing, and address reuse. Pool pages must
+not overlap input regions when pool APIs are bound. Exhaustion returns NULL.
+Invalid frees/tag mismatches stop the run; no Windows bugcheck, verifier, IRQL,
+quota, synchronization, or complete pool metadata behavior is simulated. Pool
+padding is mapped; this model is not an allocation-bounds checker. Uninitialized
+allocations are represented by zero-filled guest pages. Legacy pool types are
+limited to 0, 1, and 512, with a nonzero tag; `ExAllocatePool2` supports one of 0x40/0x80/0x100,
+optionally ORed with 0x2. Unsupported flags/arguments stop with a model error rather
+than reproduce every native error or exception path.
+
+Host-backed guest calls capture a read-only snapshot at the first such call and
+reuse it for the run, including time/counter values. The response includes the
+snapshot and its provider; per-call provenance is `source: host_snapshot` with
+fidelity `host_snapshot_bridge` in the catalog. This is actual host data adapted
+to the guest ABI, **not execution of the named kernel export**. The native provider
+requires Windows 8+ APIs and Windows x64 structure layouts (`SYSTEM_INFO`: 48 bytes,
+`MEMORYSTATUSEX`: 64 bytes with guest `dwLength=64`). On Linux these bridges are
+unavailable; portable tests inject a clearly labeled fixture provider. The agent
+can still use all guest-only models there.
+
+The third path remains the existing live-driver tools, with their validation and
+audit workflow. Guest models modify only guest state, host-snapshot APIs only read
+the host, and live driver operations are issued explicitly through their own tools.
 
 ## Verified memory patches
 
@@ -214,8 +314,10 @@ HTTP origin/host/token validation. Management tests also cover capability gating
 attachment, metadata, allocation/protection results, audit failures, and preview
 invalidation. A separate suite executes real Unicorn instruction streams and
 checks arithmetic, calls/returns, high virtual addresses, guest memory writes,
-faults, external instructions, loop budgets, and strict input validation.
-Neither suite exercises a real kernel driver.
+faults, external instructions, loop budgets, and strict input validation. A third
+suite tests API dispatch, guest pool state, named failures, provenance, snapshot
+bridges, and actual native Windows system queries in Windows CI. No suite
+exercises a real kernel driver.
 
 ## Run and connect
 
