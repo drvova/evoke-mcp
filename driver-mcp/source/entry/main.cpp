@@ -36,12 +36,7 @@ int main() {
         return 1;
     }
     driver::km->init();
-    driver::km->attach(L"FortniteClient-Win64-Shipping.exe");
     driver::windows_memory_backend backend(*driver::km);
-    if (!backend.identity()) {
-        std::cerr << "Driver or target unavailable; cannot start memory service.\n";
-        return 1;
-    }
     std::ofstream audit("evoke-mcp-audit.jsonl", std::ios::app);
     if (!audit) {
         std::cerr << "Cannot open evoke-mcp-audit.jsonl.\n";
@@ -86,8 +81,8 @@ int main() {
     });
     http_server.Get("/health", [&](const httplib::Request& request, httplib::Response& response) {
         if (!authorize(request, response)) return;
-        response.status = backend.identity() ? 200 : 503;
-        response.set_content(response.status == 200 ? "ok" : "target_unavailable", "text/plain");
+        const auto status = memory.driver_status(mcp_runtime::json::object());
+        response.set_content(status.at("structuredContent").dump(), "application/json");
     });
     http_server.Post("/mcp", [&](const httplib::Request& request, httplib::Response& response) {
         if (!authorize(request, response)) return;

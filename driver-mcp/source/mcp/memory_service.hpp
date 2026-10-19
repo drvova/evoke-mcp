@@ -21,12 +21,22 @@ namespace mcp_runtime {
                        audit_function audit = {}, now_function now = clock::now,
                        std::chrono::seconds ttl = std::chrono::seconds(60),
                        std::size_t capacity = 128);
+        json driver_status(const json& args);
+        json connect_driver(const json& args);
+        json attach_process(const json& args);
+        json detach_process(const json& args);
+        json process_info(const json& args);
+        json allocate_memory(const json& args);
+        json protect_memory(const json& args);
+        json unload_driver(const json& args);
         json get_base(const json& args);
         json read(const json& args);
         json prepare(const json& args);
         json apply(const json& args);
 
     private:
+        json control(const char* operation, json details, const std::function<json()>& action);
+        void require_operation(driver_operation operation);
         struct patch {
             target_identity target;
             std::uint64_t address;

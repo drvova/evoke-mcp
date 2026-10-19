@@ -25,11 +25,38 @@ namespace mcp_runtime {
             "byte", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "float", "double"})}};
         const json addr = {{"type", "integer"}, {"minimum", 65536}, {"maximum", 140737488355327LL},
             {"description", "Target user virtual address. Transfers must fit below the user address boundary."}};
+        const json size = {{"type", "integer"}, {"minimum", 1}, {"maximum", 140737488289792LL}};
+        const json protection = {{"type", "string"}, {"enum", json::array({
+            "no_access", "read_only", "read_write", "execute", "execute_read", "execute_read_write"})}};
         auto schema = [](json properties, json required) {
             return json{{"type", "object"}, {"properties", properties},
                         {"required", required}, {"additionalProperties", false}};
         };
         tools_ = {
+            {"get_driver_status", "Report adapter capabilities, driver availability, target identity, and pending previews. Capabilities are declarations, not a runtime ABI probe.",
+                schema(json::object(), json::array()), true,
+                [&memory](const json& args) { return memory.driver_status(args); }},
+            {"connect_driver", "Open the configured driver's device connection. Invalidates pending previews; does not install or load a driver.",
+                schema(json::object(), json::array()), false,
+                [&memory](const json& args) { return memory.connect_driver(args); }},
+            {"attach_process", "Attach the driver to an explicit PID and retain its process identity. Invalidates pending previews.",
+                schema({{"pid", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295ULL}}}}, {"pid"}), false,
+                [&memory](const json& args) { return memory.attach_process(args); }},
+            {"detach_process", "Detach from the current process. Invalidates pending previews.",
+                schema(json::object(), json::array()), false,
+                [&memory](const json& args) { return memory.detach_process(args); }},
+            {"get_process_info", "Read the attached process identity, PEB, and DTB. Full-width PEB/DTB are returned as decimal strings.",
+                schema(json::object(), json::array()), true,
+                [&memory](const json& args) { return memory.process_info(args); }},
+            {"allocate_memory", "Reserve and commit private memory in the attached process. Returns the driver's address and rounded size. Invalidates previews; does not execute code. Evoke defines no free operation.",
+                schema({{"size", size}, {"protection", protection}}, {"size", "protection"}), false,
+                [&memory](const json& args) { return memory.allocate_memory(args); }},
+            {"protect_memory", "Change memory protection in the attached process. Returns the driver's actual range and previous native protection. Invalidates previews; does not execute code.",
+                schema({{"addr", addr}, {"size", size}, {"protection", protection}}, {"addr", "size", "protection"}), false,
+                [&memory](const json& args) { return memory.protect_memory(args); }},
+            {"unload_driver", "Request driver unload, close the device on success, and invalidate pending previews. Reconnecting requires the driver to be loaded externally.",
+                schema(json::object(), json::array()), false,
+                [&memory](const json& args) { return memory.unload_driver(args); }},
             {"get_base_address", "Get the live attached process identity and image base.",
                 schema(json::object(), json::array()), true,
                 [&memory](const json& args) { return memory.get_base(args); }},
@@ -70,7 +97,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.0.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.1.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

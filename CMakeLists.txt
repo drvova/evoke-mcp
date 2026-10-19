@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(evoke_mcp VERSION 2.0.0 LANGUAGES CXX)
+project(evoke_mcp VERSION 2.1.0 LANGUAGES CXX)
 
 if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)

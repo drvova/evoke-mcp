@@ -176,6 +176,130 @@ namespace {
           check(f.backend.writes==1,"competing patches serialized");
           check(record(a).at("verified")!=record(b).at("verified"),"only one competing patch verifies"); }
     }
+    struct management_backend : fake_backend {
+        bool ready = true, fail = false;
+        int calls = 0;
+        std::uint64_t result_address = 0x20000, result_size = 4096;
+        page_protection last_protection = page_protection::no_access;
+        std::function<void()> on_control;
+        std::string_view name() const override { return "mock-control"; }
+        bool supports(driver_operation) const override { return true; }
+        bool connected() override { return ready; }
+        std::optional<target_identity> identity() override { return ready ? target : std::nullopt; }
+        bool begin() { ++calls; if(on_control) on_control(); return !fail; }
+        bool connect() override { if(!begin()) return false; ready=true; return true; }
+        bool attach(std::uint32_t pid) override {
+            if(!begin() || !ready) return false;
+            target=target_identity{pid,987654,0x10000}; return true;
+        }
+        bool detach() override { if(!begin()) return false; target.reset(); return true; }
+        bool query_process(process_information& out) override {
+            if(!begin()) return false;
+            out={0x20000,std::numeric_limits<std::uint64_t>::max()}; return true;
+        }
+        bool allocate(std::uint64_t& addr,std::uint64_t& size,page_protection protection) override {
+            last_protection=protection;
+            if(!begin()) return false;
+            addr=result_address; size=result_size; return true;
+        }
+        bool protect(std::uint64_t& addr,std::uint64_t& size,page_protection protection,std::uint32_t& old) override {
+            last_protection=protection;
+            if(!begin()) return false;
+            addr=result_address; size=result_size; old=4; return true;
+        }
+        bool unload() override { if(!begin()) return false; ready=false; target.reset(); return true; }
+    };
+    struct management_fixture {
+        management_backend backend;
+        int id=0;
+        std::vector<json> audit;
+        memory_service service;
+        management_fixture() : service(backend,[&] {return "control-"+std::to_string(++id);},
+            [&](const json& entry) {audit.push_back(entry);}) {}
+        json preview() { return record(service.prepare({{"addr",65536},{"type","u8"},{"value",20}})); }
+    };
+    void management_lifecycle_and_capabilities() {
+        { fixture f; auto p=f.prepare();
+          auto info=record(f.service.driver_status(json::object()));
+          check(info.at("adapter")=="custom" && info.at("execution_exposed")==false,"custom adapter capabilities");
+          rejects([&] {f.service.unload_driver(json::object());},"unsupported operation rejected before dispatch");
+          status(f.apply(p),"verified",false); }
+        management_fixture f;
+        auto info=record(f.service.driver_status(json::object()));
+        check(info.at("supported_operations").size()==12,"adapter reports memory and management operations");
+        check(info.at("capabilities_source")=="adapter_declarations_not_runtime_probe","capabilities not presented as probed");
+        auto p=f.preview();
+        status(f.service.detach_process(json::object()),"process_detached",false);
+        rejects([&] {f.service.apply({{"patch_id",p.at("patch_id")}});},"detach invalidates patches");
+        rejects([&] {f.service.read({{"addr",65536},{"type","u8"}});},"read without target rejected");
+        status(f.service.attach_process({{"pid",27}}),"process_attached",false);
+        info=record(f.service.process_info(json::object()));
+        check(info.at("target").at("pid")==27 && info.at("peb")=="131072","query attached process");
+        check(info.at("dtb")=="18446744073709551615","full-width metadata preserved");
+        f.backend.fail=true;
+        rejects([&] {f.service.process_info(json::object());},"metadata failure reported");
+        f.backend.fail=false;
+        status(f.service.unload_driver(json::object()),"driver_unloaded",false);
+        check(record(f.service.driver_status(json::object())).at("driver_available")==false,"unloaded status");
+        status(f.service.connect_driver(json::object()),"driver_connected",false);
+        check(record(f.service.driver_status(json::object())).at("target").is_null(),"connect does not select target");
+        status(f.service.attach_process({{"pid",28}}),"process_attached",false);
+        check(f.audit.front().at("status")=="operation_started","management audit begins before action");
+    }
+    void management_memory_and_validation() {
+        management_fixture f;
+        auto p=f.preview();
+        auto allocation=f.service.allocate_memory({{"size",100},{"protection","execute_read"}});
+        status(allocation,"memory_allocated",false);
+        check(record(allocation).at("addr")==0x20000 && record(allocation).at("size")==4096,"allocation returns rounded range");
+        check(f.backend.last_protection==page_protection::execute_read,"typed protection forwarded");
+        rejects([&] {f.service.apply({{"patch_id",p.at("patch_id")}});},"allocation invalidates previews");
+        auto protection=f.service.protect_memory({{"addr",0x20001},{"size",15},{"protection","read_only"}});
+        status(protection,"memory_protection_changed",false);
+        check(record(protection).at("previous_native_protection")==4,"previous native protection preserved");
+        f.backend.result_address=0;
+        status(f.service.allocate_memory({{"size",1},{"protection","read_write"}}),"invalid_driver_allocation_range");
+        f.backend.result_address=0x20000; f.backend.result_size=1;
+        status(f.service.allocate_memory({{"size",2},{"protection","read_write"}}),"driver_allocation_too_small");
+        status(f.service.protect_memory({{"addr",0x20000},{"size",2},{"protection","read_write"}}),"driver_protection_range_mismatch");
+        f.backend.result_address=0; f.backend.result_size=4096;
+        status(f.service.protect_memory({{"addr",0x20000},{"size",1},{"protection","read_write"}}),"invalid_driver_protection_range");
+        f.backend.result_address=0x20000;
+        f.backend.on_control=[&] {f.backend.target.reset();};
+        status(f.service.allocate_memory({{"size",1},{"protection","read_write"}}),"target_changed_after_operation");
+        management_fixture invalid;
+        for(auto pid:{json(0),json(-1),json(true),json(1.5),json(4294967296ULL)})
+            rejects([&] {invalid.service.attach_process({{"pid",pid}});},"invalid PID rejected");
+        for(auto size:{json(0),json(-1),json(true),json(1.5),json(std::numeric_limits<std::uint64_t>::max())})
+            rejects([&] {invalid.service.allocate_memory({{"size",size},{"protection","read_write"}});},"invalid allocation size rejected");
+        rejects([&] {invalid.service.allocate_memory({{"size",1},{"protection","raw_flags"}});},"unknown protection rejected");
+        rejects([&] {invalid.service.protect_memory({{"addr",0x7fffffffffffULL},{"size",2},{"protection","read_write"}});},"protection range overflow rejected");
+        rejects([&] {invalid.service.connect_driver({{"extra",true}});},"unexpected management arguments rejected");
+        check(invalid.backend.calls==0,"management validation before driver access");
+        invalid.backend.fail=true;
+        status(invalid.service.connect_driver(json::object()),"driver_connect_failed");
+        status(invalid.service.attach_process({{"pid",27}}),"driver_attach_failed");
+        status(invalid.service.detach_process(json::object()),"driver_detach_failed");
+        status(invalid.service.unload_driver(json::object()),"driver_unload_failed");
+        status(invalid.service.allocate_memory({{"size",1},{"protection","read_write"}}),"driver_allocate_failed");
+        status(invalid.service.protect_memory({{"addr",65536},{"size",1},{"protection","read_write"}}),"driver_protect_failed");
+    }
+    void management_audit_failures() {
+        { management_backend b;
+          memory_service service(b,[] {return "id";},[](const json&) {throw std::runtime_error("disk_full");});
+          service.prepare({{"addr",65536},{"type","u8"},{"value",20}});
+          status(service.detach_process(json::object()),"audit_unavailable_no_operation");
+          check(b.calls==0,"audit failure prevents management dispatch");
+          check(record(service.driver_status(json::object())).at("pending_patches")==1,"pre-audit failure retains previews"); }
+        { management_backend b; int calls=0;
+          memory_service service(b,[] {return "id";},[&](const json&) {if(++calls==2) throw std::runtime_error("disk_full");});
+          auto result=service.detach_process(json::object());
+          status(result,"process_detached",true);
+          check(record(result).at("ok")==true && record(result).contains("audit_error"),"post-audit failure preserves completed operation"); }
+        { management_fixture f; auto p=f.preview(); f.backend.fail=true;
+          status(f.service.allocate_memory({{"size",1},{"protection","read_write"}}),"driver_allocate_failed");
+          rejects([&] {f.service.apply({{"patch_id",p.at("patch_id")}});},"failed management action also invalidates preview"); }
+    }
     void protocol_and_http_security() {
         fixture f; mcp_server server(f.service);
         auto call=[&](json message) { return server.handle(message).value(); };
@@ -185,7 +309,7 @@ namespace {
         check(call({{"jsonrpc","2.0"},{"id",1},{"method","bad"}}).at("error").at("code")==-32601,"unknown method code");
         check(!server.handle({{"jsonrpc","2.0"},{"method","tools/call"},{"params",{{"name","apply_memory_patch"}}}}),"notifications do not execute tools");
         const auto tools=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/list"}}).at("result").at("tools");
-        check(tools.size()==4,"four tools");
+        check(tools.size()==12,"memory and management tools registered");
         for(const auto& tool:tools) check(tool.at("name")!="write_memory","blind writes removed");
         auto r=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/call"},
             {"params",{{"name","prepare_memory_patch"},{"arguments",{{"addr",65536},{"type","u8"},{"value",256}}}}}});
@@ -203,7 +327,9 @@ namespace {
 int main() {
     try {
         success_and_replay(); stale_and_expired(); driver_failures(); strict_validation();
-        primitive_roundtrips(); limits_audit_and_concurrency(); protocol_and_http_security();
+        primitive_roundtrips(); limits_audit_and_concurrency();
+        management_lifecycle_and_capabilities(); management_memory_and_validation();
+        management_audit_failures(); protocol_and_http_security();
         std::cout << assertions << " assertions passed\n";
         return 0;
     } catch(const std::exception& exception) {
