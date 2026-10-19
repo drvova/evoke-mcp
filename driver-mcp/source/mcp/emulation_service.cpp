@@ -164,7 +164,18 @@ namespace mcp_runtime {
                     prefix == 0x36 || prefix == 0x3e || prefix == 0x26 || prefix == 0x64 || prefix == 0x65) ++opcode;
                 else break;
             }
-            if (opcode < bytes && event.bytes[opcode] == 0xf4) { state.stop = "halted"; uc_emu_stop(engine); }
+            if (opcode < bytes) {
+                const auto op = event.bytes[opcode];
+                const bool port_io = (op >= 0xe4 && op <= 0xe7) || (op >= 0xec && op <= 0xef) ||
+                                     (op >= 0x6c && op <= 0x6f);
+                const bool system_call = op == 0x0f && opcode + 1 < bytes &&
+                    (event.bytes[opcode + 1] == 0x05 || event.bytes[opcode + 1] == 0x34);
+                if (port_io || system_call) state.stop = "external_instruction";
+                else if (op == 0xf4) state.stop = "halted";
+                // Stop before execution, preserving registers instead of supplying
+                // a fabricated port-read result or a syscall return value.
+                if (state.stop) uc_emu_stop(engine);
+            }
         }
         void on_memory(uc_engine*, uc_mem_type access, std::uint64_t addr, int size, std::int64_t value, void* context) {
             auto& state = *static_cast<trace_state*>(context);
@@ -177,17 +188,6 @@ namespace mcp_runtime {
             state.has_fault = true;
             state.fault = {access, addr, size, static_cast<std::uint64_t>(value)};
             return false;
-        }
-        void on_syscall(uc_engine* engine, void* context) {
-            static_cast<trace_state*>(context)->stop = "external_instruction";
-            uc_emu_stop(engine);
-        }
-        std::uint32_t on_input(uc_engine* engine, std::uint32_t, int, void* context) {
-            on_syscall(engine, context);
-            return 0; // Execution is stopped; no host port I/O is performed.
-        }
-        void on_output(uc_engine* engine, std::uint32_t, int, std::uint32_t, void* context) {
-            on_syscall(engine, context);
         }
         void on_interrupt(uc_engine* engine, std::uint32_t interrupt, void* context) {
             auto& state = *static_cast<trace_state*>(context);
@@ -273,10 +273,6 @@ namespace mcp_runtime {
         check(uc_hook_add(raw, &hook, UC_HOOK_MEM_INVALID, reinterpret_cast<void*>(on_fault), &state, 1, 0));
         check(uc_hook_add(raw, &hook, UC_HOOK_INTR, reinterpret_cast<void*>(on_interrupt), &state, 1, 0));
         check(uc_hook_add(raw, &hook, UC_HOOK_INSN_INVALID, reinterpret_cast<void*>(on_invalid), &state, 1, 0));
-        check(uc_hook_add(raw, &hook, UC_HOOK_INSN, reinterpret_cast<void*>(on_syscall), &state, 1, 0, UC_X86_INS_SYSCALL));
-        check(uc_hook_add(raw, &hook, UC_HOOK_INSN, reinterpret_cast<void*>(on_syscall), &state, 1, 0, UC_X86_INS_SYSENTER));
-        check(uc_hook_add(raw, &hook, UC_HOOK_INSN, reinterpret_cast<void*>(on_input), &state, 1, 0, UC_X86_INS_IN));
-        check(uc_hook_add(raw, &hook, UC_HOOK_INSN, reinterpret_cast<void*>(on_output), &state, 1, 0, UC_X86_INS_OUT));
         const auto error = uc_emu_start(raw, code_address + offset, until, timeout_ms * 1000, instruction_limit);
         std::uint64_t rip = 0;
         check(uc_reg_read(raw, UC_X86_REG_RIP, &rip));

@@ -83,6 +83,10 @@ namespace {
         check(result(call).at("fault").at("access") == "fetch_unmapped", "missing routine diagnosed");
         for (auto code : {"0f05", "0f34", "ec", "ee"})
             status(service.run({{"code_hex", code}}), "external_instruction");
+        const auto input = service.run({{"code_hex", "f3ec"}, {"registers", {{"rax", 42}}}});
+        status(input, "external_instruction");
+        check(result(input).at("registers").at("rax") == "0x2a", "unmodeled port input preserves register state");
+        check(result(input).at("rip") == "0x100000", "external instruction is not executed");
         status(service.run({{"code_hex", "cc"}}), "interrupt");
         status(service.run({{"code_hex", "f4"}}), "halted");
         status(service.run({{"code_hex", "f3f4"}}), "halted");
