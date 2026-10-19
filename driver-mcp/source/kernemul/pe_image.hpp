@@ -7,6 +7,10 @@
 #include <string>
 #include <vector>
 namespace evoke_pe {
+enum class architecture { x86, amd64, arm64 };
+inline const char* architecture_name(architecture arch) {
+    return arch==architecture::x86?"x86":arch==architecture::arm64?"arm64":"amd64";
+}
 struct section {std::uint32_t rva,size,flags;};
 struct import {std::string module,name;std::uint32_t slot;};
 class image {
@@ -18,30 +22,37 @@ class image {
         if(at>bytes.size()||size>bytes.size()-at)throw std::invalid_argument("pe_rva_out_of_bounds");
     }
     std::pair<std::uint32_t,std::uint32_t> directory(unsigned index) const {
-        if(index>=directories_)return {};const auto at=optional_+112+index*8;
+        if(index>=directories_)return {};const auto at=optional_+directory_offset_+index*8;
         return {get<std::uint32_t>(bytes,at),get<std::uint32_t>(bytes,at+4)};
     }
-    std::size_t optional_=0;unsigned directories_=0;
+    std::size_t optional_=0;unsigned directories_=0,directory_offset_=112;
 public:
+    architecture arch=architecture::amd64;
+    unsigned pointer_size=8;
     std::vector<std::uint8_t> bytes;std::vector<section> sections;
     std::uint64_t preferred_base=0;std::uint32_t entry=0,header_size=0;
     explicit image(std::span<const std::uint8_t> raw,bool executable=true) {
         if(raw.size()>(executable?2u:4u)*1024*1024||raw.size()<64||get<std::uint16_t>(raw,0)!=0x5a4d)throw std::invalid_argument("invalid_pe_dos_header");
         const auto nt=get<std::uint32_t>(raw,60);
-        if(get<std::uint32_t>(raw,nt)!=0x4550||get<std::uint16_t>(raw,std::size_t(nt)+4)!=0x8664)throw std::invalid_argument("pe_requires_amd64");
+        if(get<std::uint32_t>(raw,nt)!=0x4550)throw std::invalid_argument("invalid_pe_signature");
+        const auto machine=get<std::uint16_t>(raw,std::size_t(nt)+4);
+        if(machine==0x14c){arch=architecture::x86;pointer_size=4;directory_offset_=96;}
+        else if(machine==0xaa64)arch=architecture::arm64;
+        else if(machine!=0x8664)throw std::invalid_argument("unsupported_pe_machine");
         const auto count=get<std::uint16_t>(raw,std::size_t(nt)+6),optional_size=get<std::uint16_t>(raw,std::size_t(nt)+20);
         optional_=std::size_t(nt)+24;
-        if(!count||count>32||optional_size<112||optional_>raw.size()||optional_size>raw.size()-optional_||get<std::uint16_t>(raw,optional_)!=0x20b)
+        if(!count||count>32||optional_size<directory_offset_||optional_>raw.size()||optional_size>raw.size()-optional_||
+            get<std::uint16_t>(raw,optional_)!=(pointer_size==4?0x10b:0x20b))
             throw std::invalid_argument("invalid_pe_optional_header");
-        directories_=get<std::uint32_t>(raw,optional_+108);
-        if(directories_>16||112+directories_*8>optional_size)throw std::invalid_argument("invalid_pe_directories");
+        directories_=get<std::uint32_t>(raw,optional_+directory_offset_-4);
+        if(directories_>16||directory_offset_+directories_*8>optional_size)throw std::invalid_argument("invalid_pe_directories");
         const auto size=get<std::uint32_t>(raw,optional_+56);header_size=get<std::uint32_t>(raw,optional_+60);
         const auto alignment=get<std::uint32_t>(raw,optional_+32);
         if(!size||size>16*1024*1024||size%4096||!header_size||header_size>size||header_size>raw.size()||alignment<4096||(alignment&(alignment-1)))
             throw std::invalid_argument("invalid_pe_image_size_or_alignment");
         const auto table=optional_+optional_size;
         if(table>header_size||std::size_t(count)*40>header_size-table)throw std::invalid_argument("invalid_pe_section_table");
-        preferred_base=get<std::uint64_t>(raw,optional_+24);entry=get<std::uint32_t>(raw,optional_+16);
+        preferred_base=pointer_size==4?get<std::uint32_t>(raw,optional_+28):get<std::uint64_t>(raw,optional_+24);entry=get<std::uint32_t>(raw,optional_+16);
         bytes.resize(size);std::copy_n(raw.begin(),header_size,bytes.begin());
         for(unsigned i=0;i<count;++i) {
             const auto p=table+i*40;const auto va=get<std::uint32_t>(raw,p+12),virtual_size=get<std::uint32_t>(raw,p+8);
@@ -58,6 +69,7 @@ public:
         }
         for(unsigned i=0;i<directories_;++i) {const auto [at,length]=directory(i);if(i!=4&&length)range(at,length);}
         if(executable) {
+            if(arch!=architecture::amd64)throw std::invalid_argument(std::string("pe_execution_architecture_unsupported: ")+architecture_name(arch));
             if(!is_executable(entry))throw std::invalid_argument("pe_entry_not_executable");
             for(auto i:{9u,13u,14u})if(directory(i).second)throw std::invalid_argument("pe_tls_delay_imports_or_clr_unsupported");
         }
@@ -80,12 +92,13 @@ public:
             if(!name||!iat)throw std::invalid_argument("invalid_pe_import_descriptor");
             const auto module=string(name);bool ended=false;
             for(unsigned i=0;i<512;++i) {
-                const auto thunk=read<std::uint64_t>(std::uint64_t(lookup?lookup:iat)+i*8);
+                const auto thunk_at=std::uint64_t(lookup?lookup:iat)+i*pointer_size;
+                const auto thunk=pointer_size==4?std::uint64_t(read<std::uint32_t>(thunk_at)):read<std::uint64_t>(thunk_at);
                 if(!thunk){ended=true;break;}
-                if(thunk>>63)throw std::invalid_argument("pe_ordinal_import_unsupported");
+                if(thunk>>(pointer_size*8-1))throw std::invalid_argument("pe_ordinal_import_unsupported");
                 if(thunk>UINT32_MAX-2)throw std::invalid_argument("invalid_pe_import_name");
-                range(std::uint64_t(iat)+i*8,8);
-                out.push_back({module,string(static_cast<std::uint32_t>(thunk)+2),iat+i*8});
+                range(std::uint64_t(iat)+i*pointer_size,pointer_size);
+                out.push_back({module,string(static_cast<std::uint32_t>(thunk)+2),iat+i*pointer_size});
                 if(out.size()>512)throw std::invalid_argument("too_many_pe_imports");
             }
             if(!ended)throw std::invalid_argument("unterminated_pe_thunks");
@@ -108,6 +121,7 @@ public:
         }return out;
     }
     void relocate(std::uint64_t base) {
+        if(arch!=architecture::amd64)throw std::invalid_argument(std::string("pe_execution_architecture_unsupported: ")+architecture_name(arch));
         const auto [at,size]=directory(5);const auto delta=base-preferred_base;
         if(delta&&!size)throw std::invalid_argument("pe_relocations_required");
         for(std::uint32_t off=0;off<size;) {

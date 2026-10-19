@@ -131,12 +131,19 @@ struct runtime {
         const evoke_pe::image image(raw,false);
         const auto analysis_limit=args.contains("analysis_instruction_limit")?number(args.at("analysis_instruction_limit")):8192;
         if(!analysis_limit||analysis_limit>32768)throw std::invalid_argument("invalid_analysis_instruction_limit");
+        for(const auto& [key,maximum]:{std::pair{"instruction_limit",100000u},{"trace_limit",512u},{"execution_timeout_ms",1000u}})
+            if(args.contains(key)&&(!args.at(key).is_number_integer()||!number(args.at(key))||number(args.at(key))>maximum))
+                throw std::invalid_argument(std::string("invalid_")+key);
         json observations={{"dispatch_routines",json::array()},{"namespace_events",json::array()}};
         json execution_args=args;execution_args.erase("analysis_instruction_limit");execution_args["kind"]="driver";
         // Snapshot once: discovery and emulation must refer to the exact same source bytes.
         execution_args.erase("image_path");execution_args["image_hex"]=encode(raw);
         json initialization;
-        try {initialization=execute_image(execution_args,&observations);}
+        try {
+            if(image.arch==evoke_pe::architecture::amd64)initialization=execute_image(execution_args,&observations);
+            else initialization={{"status","unsupported_execution_architecture"},{"architecture",evoke_pe::architecture_name(image.arch)},
+                {"reason","Bundled Windows guest execution currently uses the AMD64 ABI; static contract analysis is available."}};
+        }
         catch(const std::exception& error){initialization={{"status","initialization_unavailable"},{"error",error.what()}};}
         std::vector<evoke_contract::dispatch_root> roots;
         for(const auto& r:observations["dispatch_routines"])if(r.contains("rva"))
@@ -146,10 +153,13 @@ struct runtime {
         try {for(const auto& imp:image.imports()) {
             auto module=module_name(imp.module);if(module=="ntkrnlmp.exe")module="ntoskrnl.exe";
             imports.push_back({{"module",imp.module},{"name",imp.name},{"iat_rva",imp.slot},
-                {"modeled",handlers.contains({module=="ntdll.dll"?"ntoskrnl.exe":module,imp.name})}});
+                {"modeled",image.arch==evoke_pe::architecture::amd64&&handlers.contains({module=="ntdll.dll"?"ntoskrnl.exe":module,imp.name})},
+                {"handler_registered",handlers.contains({module=="ntdll.dll"?"ntoskrnl.exe":module,imp.name})}});
         }}catch(const std::exception& error){report["import_analysis_error"]=error.what();}
         report["imports"]=std::move(imports);report["status"]="completed";report["tool"]="discover_driver_contract";
-        report["source"]="kernemul_and_capstone";report["source_input"]=args.contains("image_path")?"host_file":"supplied_hex";
+        report["source"]=image.arch==evoke_pe::architecture::amd64?"kernemul_and_capstone":"capstone";
+        report["analysis_available"]=true;report["guest_execution_available"]=image.arch==evoke_pe::architecture::amd64;
+        report["operating_system"]="windows";report["source_input"]=args.contains("image_path")?"host_file":"supplied_hex";
         report["observations"]=std::move(observations);
         const bool returned=initialization.value("status",std::string())=="completed";
         report["initialization_succeeded"]=returned&&static_cast<std::int32_t>(number(initialization.at("entry_return_value")))>=0;

@@ -111,6 +111,8 @@ json windows_service::info(const json& args) {
     if(!args.is_object()||!args.empty())throw std::invalid_argument("unexpected_windows_info_argument");
     return make_tool_result("windows_emulation_info",{{"backend","kernemul"},{"bundled_worker_available",std::filesystem::is_regular_file(worker_)},
         {"upstream_revision","cf3aedc6cc1755d2fedad77dcd4671bf045f9de8"},{"architecture","x86_64"},
+        {"contract_target_architectures",json::array({"x86","amd64","arm64"})},
+        {"windows_guest_execution_architectures",json::array({"amd64"})},{"host_process_bits",sizeof(void*)*8},
         {"operation_discovery","list_windows_operations"},{"execution","emulate_windows_operations"},
         {"state_lifetime","this_request"},{"max_operations",64},{"max_buffers",32},{"max_buffer_bytes",16384},
         {"max_total_buffer_bytes",65536},{"max_timeout_ms",10000},{"default_timeout_ms",3000},

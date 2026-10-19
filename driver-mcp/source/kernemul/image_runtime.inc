@@ -60,6 +60,7 @@
         std::size_t unsupported_stubs=0;
         if(args.contains("syscall_stubs_hex")||args.contains("syscall_stubs_path")) {
             const evoke_pe::image stubs(image_input(args,"syscall_stubs_hex","syscall_stubs_path",4*1024*1024),false);
+            if(stubs.arch!=evoke_pe::architecture::amd64)throw std::invalid_argument("syscall_stub_architecture_mismatch");
             for(const auto& exp:stubs.exports())if(exp.name.starts_with("Nt")) {
                 const auto id=state.syscalls->decode_id(std::span<const std::uint8_t>(stubs.bytes).subspan(exp.rva));
                 if(!id)continue;

@@ -56,9 +56,10 @@ set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory("${evoke_spdlog_SOURCE_DIR}" "${evoke_spdlog_BINARY_DIR}" EXCLUDE_FROM_ALL)
 add_subdirectory("${evoke_raw_pdb_SOURCE_DIR}" "${evoke_raw_pdb_BINARY_DIR}" EXCLUDE_FROM_ALL)
-# Required bounded driver-contract disassembly; only the AMD64 backend is built.
+# Required Windows x86, AMD64 and ARM64 driver-contract disassembly.
 set(CAPSTONE_ARCHITECTURE_DEFAULT OFF CACHE BOOL "" FORCE)
 set(CAPSTONE_X86_SUPPORT ON CACHE BOOL "" FORCE)
+set(CAPSTONE_ARM64_SUPPORT ON CACHE BOOL "" FORCE)
 set(CAPSTONE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(CAPSTONE_BUILD_CSTOOL OFF CACHE BOOL "" FORCE)
 set(CAPSTONE_INSTALL OFF CACHE BOOL "" FORCE)

@@ -78,7 +78,7 @@ namespace mcp_runtime {
                     {"offset",{{"type","integer"},{"minimum",0},{"maximum",4096}}},
                     {"limit",{{"type","integer"},{"minimum",1},{"maximum",200},{"default",100}}}},json::array()),
                 true, [](const json& args){return list_system_drivers(args);}},
-            {"discover_driver_contract", "Analyze a supplied AMD64 driver using bounded disassembly and modeled DriverEntry execution. Discover registered dispatch routines, IOCTL candidates with IO_STACK_LOCATION dataflow evidence, length comparisons, buffer accesses and device-name hints. Return a SHA-256-bound partial contract with provenance and initialization stop reasons. Does not probe live devices or activate an inferred live adapter.",
+            {"discover_driver_contract", "Auto-detect Windows x86, AMD64 or ARM64 drivers for bounded architecture-specific contract analysis. AMD64 additionally supports modeled DriverEntry execution. Discover registered dispatch routines, IOCTL candidates with IO_STACK_LOCATION dataflow evidence, length comparisons, buffer accesses and device-name hints. Return a SHA-256-bound partial contract with provenance and initialization stop reasons. Does not probe live devices or activate an inferred live adapter.",
                 discovery_schema, true, [this](const json& args) { return windows_.discover_contract(args); }},
             {"emulate_windows_image", "Load and execute a supplied AMD64 PE entry point or routine in the bounded KernEmul guest. Resolve named imports to original handlers; trap numeric syscalls using explicit mappings or matching supplied ntdll stubs. Return registers, traces and watched guest bytes. DriverEntry gets modeled driver arguments. No native image loading or live-driver execution; unsupported imports/features stop explicitly.",
                 image_schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
@@ -222,7 +222,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.6.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.7.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

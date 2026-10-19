@@ -13,7 +13,7 @@ and local-only symbol lookup. Operation bodies are upstream implementations.
   Required, linked into the server core and worker. See the fetched `COPYING`.
 - **nlohmann JSON 3.12.0** — MIT, fetched archive retains its license.
 - **Capstone 5.0.6** — BSD-3-Clause and bundled component notices, pinned by
-  archive SHA-256 in `cmake/kernemul/dependencies.json`. Required x86 disassembler
+  archive SHA-256 in `cmake/kernemul/dependencies.json`. Required x86/ARM64 disassemblers
   for contract discovery; fetched `LICENSE.TXT` and component licenses retained.
 - **spdlog 1.15.3** — MIT; includes fmt with its bundled license.
 - **Molecular Matters raw_pdb** — BSD-2-Clause; fetched `LICENSE` retained.

@@ -34,4 +34,14 @@ inline bytes stubs() {
     put<std::uint32_t>(b,0x51c,0x2140);put<std::uint32_t>(b,0x520,0x2148);put<std::uint32_t>(b,0x524,0x2150);
     put<std::uint32_t>(b,0x540,0x1000);put<std::uint32_t>(b,0x548,0x2160);text(b,0x560,"NtQuerySystemTime");return b;
 }
+inline bytes pe32(bytes b) {
+    // Canonical PE32 optional header: 224 bytes; data directories begin at +96.
+    const bytes sections(b.begin()+0x188,b.begin()+0x1d8),directories(b.begin()+0x108,b.begin()+0x188);
+    std::fill(b.begin()+0xf4,b.begin()+0x1d8,0);
+    std::copy(directories.begin(),directories.end(),b.begin()+0xf8);
+    std::copy(sections.begin(),sections.end(),b.begin()+0x178);
+    put<std::uint16_t>(b,0x84,0x14c);put<std::uint16_t>(b,0x94,224);put<std::uint16_t>(b,0x96,0x102);put<std::uint16_t>(b,0x98,0x10b);
+    put<std::uint32_t>(b,0xb0,0x2000);put<std::uint32_t>(b,0xb4,0x400000);put<std::uint32_t>(b,0xf4,16);
+    return b;
+}
 }

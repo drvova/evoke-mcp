@@ -15,6 +15,9 @@ json discover(windows_service& service,const pe_fixture::bytes& image,json optio
 }
 int main(){try {
     windows_service service;auto b=contract_fixture::driver();auto out=discover(service,b);
+    const auto info=service.info(json::object()).at("structuredContent");
+    check(info.at("contract_target_architectures")==json::array({"x86","amd64","arm64"}),"agents can discover all contract target architectures");
+    check(info.at("windows_guest_execution_architectures")==json::array({"amd64"}),"agents can distinguish guest execution support");
     check(out.at("initialization_succeeded")==true,"actual driver initialization succeeds");
     check(out.at("source_sha256").get<std::string>().size()==64,"contract bound to exact binary");
     check(out.at("observations").at("dispatch_routines")[0].at("rva")==0x1040,"actual DRIVER_OBJECT dispatch registration captured");
@@ -27,6 +30,14 @@ int main(){try {
     check(out.at("device_path_hints").size()==2,"ASCII and UTF16 namespace hints extracted");
     check(out.at("live_adapter_ready")==false&&out.at("buffer_layout_complete")==false,"inferred evidence never claims a complete live ABI");
     check(out.at("live_system_modified")==false,"discovery has guest-only effects");
+    for(const auto& binary:{contract_fixture::x86_driver(),contract_fixture::arm64_driver()}) {
+        out=discover(service,binary);
+        check(out.at("ioctl_candidates")[0].at("code")==0x222004,"x86 and ARM64 contract discovery reachable through worker");
+        check(out.at("analysis_available")==true&&out.at("guest_execution_available")==false,"analysis capability distinct from Windows ABI execution");
+        check(out.at("initialization").at("status")=="unsupported_execution_architecture"&&out.at("initialization_succeeded")==false,"other architectures never run through the AMD64 guest");
+        const auto execution=service.image({{"image_hex",pe_fixture::hex(binary)},{"timeout_ms",10000}});
+        check(execution.at("isError")==true&&execution.at("structuredContent").at("error").get<std::string>().starts_with("pe_execution_architecture_unsupported:"),"PE execution rejects ABI mismatch explicitly");
+    }
     out=discover(service,contract_fixture::driver(true));
     check(out.at("ioctl_candidates")[0].at("code")==0x222004,"emulated registration enables discovery beyond static registration patterns");
     auto failed=b;failed[0x20e]=0xb8;pe_fixture::put<std::uint32_t>(failed,0x20f,0xc0000001);failed[0x213]=0xc3;
