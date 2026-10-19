@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <Filter Include="Source Files">
@@ -18,13 +18,7 @@
     <ClCompile Include="source\entry\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="source\mcp\routines\get_base.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="source\mcp\routines\read.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="source\mcp\routines\write.cpp">
+    <ClCompile Include="source\mcp\memory_service.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="source\mcp\server.cpp">
@@ -47,16 +41,22 @@
     <ClInclude Include="source\httplib\httplib.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="source\mcp\memory_backend.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="source\mcp\memory_service.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="source\mcp\http_security.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="source\mcp\routines\type_dispatch.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="source\driver\memory_backend.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
     <ClInclude Include="source\mcp\common.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="source\mcp\routines\get_base.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="source\mcp\routines\read.hpp">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="source\mcp\routines\write.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="source\mcp\server.hpp">
