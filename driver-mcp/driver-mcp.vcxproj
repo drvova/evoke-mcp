@@ -102,6 +102,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -118,6 +119,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -132,6 +134,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -148,6 +151,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -155,6 +159,7 @@
     <ClCompile Include="source\entry\main.cpp" />
     <ClCompile Include="source\mcp\server.cpp" />
     <ClCompile Include="source\mcp\memory_service.cpp" />
+    <ClCompile Include="source\mcp\emulation_service.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\driver\communications.hpp" />
@@ -164,6 +169,7 @@
     <ClInclude Include="source\httplib\httplib.h" />
     <ClInclude Include="source\mcp\memory_backend.hpp" />
     <ClInclude Include="source\mcp\memory_service.hpp" />
+    <ClInclude Include="source\mcp\emulation_service.hpp" />
     <ClInclude Include="source\mcp\http_security.hpp" />
     <ClInclude Include="source\mcp\routines\type_dispatch.hpp" />
     <ClInclude Include="source\driver\memory_backend.hpp" />

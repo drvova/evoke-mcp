@@ -32,7 +32,32 @@ namespace mcp_runtime {
             return json{{"type", "object"}, {"properties", properties},
                         {"required", required}, {"additionalProperties", false}};
         };
+        const json emulation_integer = {{"oneOf", json::array({
+            {{"type", "integer"}, {"minimum", 0}},
+            {{"type", "string"}, {"pattern", "^(0x[0-9a-fA-F]+|[0-9]+)$"}}
+        })}};
+        const json emulation_registers = {{"type", "object"}, {"additionalProperties", false}, {"properties", json::object()}};
+        auto register_schema = emulation_registers;
+        for (auto name : {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rflags", "fs_base", "gs_base"})
+            register_schema["properties"][name] = emulation_integer;
         tools_ = {
+            {"get_emulation_info", "Report the built-in Unicorn x86-64 emulator, limits, default stack, and lack of Windows kernel API modeling. Available without a connected driver.",
+                schema(json::object(), json::array()), true,
+                [this](const json& args) { return emulation_.info(args); }},
+            {"emulate_region", "Emulate supplied x86-64 bytes with optional registers and guest memory. Return registers, instruction/memory traces, changed guest bytes, and a precise stop reason. No live-driver access; missing memory and external instructions stop execution. Fresh state per call.",
+                schema({
+                    {"code_hex", {{"type", "string"}, {"minLength", 2}, {"maxLength", 32768}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                    {"address", emulation_integer}, {"entry_offset", emulation_integer}, {"registers", register_schema},
+                    {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
+                    {"timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}, {"default", 100}}},
+                    {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
+                    {"memory", {{"type", "array"}, {"maxItems", 8}, {"items", schema({
+                        {"address", emulation_integer},
+                        {"bytes_hex", {{"type", "string"}, {"minLength", 2}, {"maxLength", 8192}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                        {"permissions", {{"type", "string"}, {"enum", json::array({"r", "rw", "rx", "rwx"})}, {"default", "rw"}}}
+                    }, {"address", "bytes_hex"})}}}
+                }, {"code_hex"}), true,
+                [this](const json& args) { return emulation_.run(args); }},
             {"get_driver_status", "Report adapter capabilities, driver availability, target identity, and pending previews. Capabilities are declarations, not a runtime ABI probe.",
                 schema(json::object(), json::array()), true,
                 [&memory](const json& args) { return memory.driver_status(args); }},
@@ -97,7 +122,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.1.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.2.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

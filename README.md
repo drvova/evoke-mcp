@@ -1,7 +1,85 @@
 # evoke-mcp
 
-A Windows x64 MCP server for driver management and typed memory access through
-a compatible local kernel driver. It exposes authenticated Streamable HTTP at `http://127.0.0.1:8888/mcp`.
+A Windows x64 MCP server with built-in Unicorn emulation, driver management, and
+typed memory access through a compatible local kernel driver. It exposes
+authenticated Streamable HTTP at `http://127.0.0.1:8888/mcp`.
+
+## Built-in code-region emulation
+
+Unicorn **is a required dependency in every build**. The `get_emulation_info` and
+`emulate_region` tools are always registered, including when no driver or process
+is connected. There is no plugin installation or enable/disable option.
+
+`emulate_region` runs supplied x86-64 machine-code bytes with an initial register
+state and explicitly supplied guest memory. This is useful for inspecting a
+selected routine or code section extracted from a driver binary. The emulator has
+no driver-backend reference: it neither reads nor modifies live kernel/process
+memory, and no driver source is required for the supplied bytes. It does not load
+PE files, resolve imports, supply Windows kernel APIs, or model a complete kernel.
+
+For example, this computes `7 + 35` and returns `rax: "0x2a"`:
+
+```json
+{
+  "name": "emulate_region",
+  "arguments": {
+    "code_hex": "4889c84801d0c3",
+    "registers": { "rcx": 7, "rdx": 35 },
+    "instruction_limit": 100,
+    "timeout_ms": 100
+  }
+}
+```
+
+Arguments:
+
+| Field | Meaning |
+| --- | --- |
+| `code_hex` | Required contiguous hex bytes, up to 16 KiB of x86-64 code. |
+| `address` | Guest code address; defaults to `0x100000`. High kernel virtual addresses are supported. |
+| `entry_offset` | Byte offset within the supplied code where execution begins; defaults to zero. |
+| `registers` | Initial general-purpose registers, `rflags`, `fs_base`, and `gs_base`. Unknown names are rejected. |
+| `memory` | Up to eight `{address, bytes_hex, permissions}` guest regions, at most 4 KiB of supplied bytes each. Permissions are `r`, `rw` (default), `rx`, or `rwx`. |
+| `instruction_limit` | Maximum instructions: default 10,000, maximum 100,000. |
+| `timeout_ms` | Unicorn execution timeout: default 100 ms, maximum 500 ms. |
+| `trace_limit` | Maximum entries in each trace: default 128, maximum 512. |
+
+Addresses and register values accept unsigned JSON integers or decimal / `0x`
+strings; use strings to preserve full-width values in JavaScript clients. Limits
+require JSON integers. The code is mapped read/execute. Guest memory maps are
+rounded to 4 KiB pages and their remaining bytes are zero-filled. Regions sharing
+a page with each other, the code, or the default stack are rejected. All mappings
+are guest virtual addresses, without live or emulated Windows page-table walks.
+
+A fresh 64 KiB read/write stack is mapped at `0x70000000` for each call. Default
+`rsp` is `0x7000ffd8`, with a synthetic return address pointing to the end of the
+supplied code and space for the Windows x64 calling convention. Overriding `rsp`
+requires supplying the appropriate guest memory and return state yourself.
+
+Results include final registers and RIP as hex strings, instruction addresses and
+bytes, memory-access attempts, before/after bytes for every explicit data region,
+and a stop reason. `completed` means execution reached the end of the supplied
+code (by falling through or returning to the synthetic address); it does not prove
+that a real driver would behave identically. `instructions_observed` counts entry
+into instruction hooks, including instructions subsequently stopped or faulted.
+Truncation flags identify incomplete traces. Write values in the memory trace are
+provided only for accesses at most eight bytes wide; returned guest bytes capture
+the final state of supplied regions.
+
+Unmapped/protected accesses report the address, size, and access type. System
+calls, port I/O, interrupts, invalid instructions, and HLT stop execution instead
+of forwarding to Windows or inventing kernel API results. Missing calls commonly
+appear as an unmapped instruction fetch; the emulator reports the address and
+does not infer the API name. Partial runs retain their trace and registers with
+`isError: true`. Infinite loops stop at the instruction or execution-time budget.
+These are execution limits, not a hard wall-clock deadline for request setup.
+
+Each call has fresh state; there are no persistent sessions. One emulation runs
+at a time per server, and another emulation request receives `emulation_busy`.
+The translation buffer is configured to 16 MiB (Unicorn may adjust it). Unicorn
+runs in the MCP process and guest memory is separate from host memory; this is
+not an OS sandbox or a full-system virtual machine. See [third-party notices](THIRD_PARTY.md)
+for the required engine's licensing.
 
 ## Verified memory patches
 
@@ -96,15 +174,19 @@ currently, and its management ABI has not been tested against a real driver.
 
 The supplied Evoke interface defines **no free-memory or general execution
 operation**. Its `eac_call` declaration has no accompanying kernel handler, so it
-is not exposed as a general executor. Status reports `execution_exposed: false`.
-Execution and memory release require an adapter with an actual documented driver
-contract; neither is simulated or implemented by guessing new IOCTLs.
+is not exposed as a general executor. Status reports `execution_exposed: false` for live driver execution and
+`emulation_available: true` for the built-in offline emulator. Live execution and
+memory release require an adapter with an actual documented driver contract;
+neither is implemented by guessing new IOCTLs.
 
 ## Build
 
 Use CMake 3.20+, a C++20 compiler, and the Windows SDK / Visual Studio 2022 C++
 build tools. CMake downloads nlohmann JSON 3.12.0 from a pinned, SHA-256-verified
-archive. `cpp-httplib` remains included in the repository.
+archive, and builds the required Unicorn 2.1.4 engine from its own pinned,
+SHA-256-verified archive. Only the x86 architecture family is compiled. A C
+compiler is also required for Unicorn; there is no emulation-free build.
+`cpp-httplib` remains included in the repository.
 
 ```powershell
 cmake -S . -B build -A x64
@@ -114,7 +196,8 @@ ctest --test-dir build -C Release --output-on-failure
 
 The executable is `build/Release/driver-mcp.exe`. The existing Visual Studio
 solution can also be built as **x64** after installing vcpkg and running
-`vcpkg integrate install`; `vcpkg.json` supplies nlohmann JSON. Win32 builds are
+`vcpkg integrate install`; `vcpkg.json` supplies nlohmann JSON and Unicorn (use a current vcpkg checkout
+with Unicorn 2.1.4). Win32 builds are
 unsupported because the driver protocol and process addresses require x64.
 
 The transaction core and mock-driver tests also build on Linux:
@@ -129,7 +212,10 @@ The tests cover typed conversion boundaries, failed reads and writes, stale byte
 process lifetime changes, expiry, replay, competing requests, audit failures, and
 HTTP origin/host/token validation. Management tests also cover capability gating,
 attachment, metadata, allocation/protection results, audit failures, and preview
-invalidation. They do not exercise a real kernel driver.
+invalidation. A separate suite executes real Unicorn instruction streams and
+checks arithmetic, calls/returns, high virtual addresses, guest memory writes,
+faults, external instructions, loop budgets, and strict input validation.
+Neither suite exercises a real kernel driver.
 
 ## Run and connect
 

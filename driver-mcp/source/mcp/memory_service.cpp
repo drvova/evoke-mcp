@@ -198,7 +198,7 @@ namespace mcp_runtime {
         return make_tool_result("driver_status", {
             {"adapter", std::string(backend_.name())}, {"driver_available", backend_.connected()},
             {"target", target ? target_json(*target) : json(nullptr)}, {"supported_operations", operations},
-            {"execution_exposed", false}, {"capabilities_source", "adapter_declarations_not_runtime_probe"},
+            {"execution_exposed", false}, {"emulation_available", true}, {"capabilities_source", "adapter_declarations_not_runtime_probe"},
             {"pending_patches", patches_.size()}
         });
     }

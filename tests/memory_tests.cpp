@@ -309,8 +309,12 @@ namespace {
         check(call({{"jsonrpc","2.0"},{"id",1},{"method","bad"}}).at("error").at("code")==-32601,"unknown method code");
         check(!server.handle({{"jsonrpc","2.0"},{"method","tools/call"},{"params",{{"name","apply_memory_patch"}}}}),"notifications do not execute tools");
         const auto tools=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/list"}}).at("result").at("tools");
-        check(tools.size()==12,"memory and management tools registered");
+        check(tools.size()==14,"memory and management tools registered");
         for(const auto& tool:tools) check(tool.at("name")!="write_memory","blind writes removed");
+        auto emulated=call({{"jsonrpc","2.0"},{"id",2},{"method","tools/call"},
+            {"params",{{"name","emulate_region"},{"arguments",{{"code_hex","4889c84801d0c3"},{"registers",{{"rcx",7},{"rdx",35}}}}}}}});
+        check(emulated.at("result").at("structuredContent").at("registers").at("rax")=="0x2a","built-in emulator reachable through MCP");
+        check(f.backend.reads==0 && f.backend.writes==0,"emulation does not touch live backend");
         auto r=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/call"},
             {"params",{{"name","prepare_memory_patch"},{"arguments",{{"addr",65536},{"type","u8"},{"value",256}}}}}});
         check(r.at("result").at("isError")==true && f.backend.writes==0,"tool validation error surfaced");
