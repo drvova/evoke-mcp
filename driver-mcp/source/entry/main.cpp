@@ -49,7 +49,7 @@ int main() {
     });
     mcp_runtime::mcp_server server_core(memory);
     httplib::Server http_server;
-    http_server.set_payload_max_length(128 * 1024);
+    http_server.set_payload_max_length(8 * 1024 * 1024);
 
     const auto authorize = [&](const httplib::Request& request, httplib::Response& response, bool preflight = false) {
         const auto origin = request.get_header_value("Origin");

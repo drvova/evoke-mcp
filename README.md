@@ -160,9 +160,9 @@ means the handler ran; inspect its return value for NTSTATUS failure and its
 warnings for approximations. Unknown operations, bad guest addresses and thrown
 handler errors are explicit errors. Earlier guest effects are not rolled back.
 
-Nt/Zw routines are invoked **by name**, using the same original handler bodies;
-this interface does not build an OS-specific numeric syscall table or execute PE
-images. It does not run the guest scheduler. Calls that move the current guest PC,
+The batch interface invokes Nt/Zw routines **by name**, using the same original
+handler bodies. Use `emulate_windows_image` below for PE code and numeric syscall
+dispatch. It does not run the guest scheduler. Calls that move the current guest PC,
 sleep, wait, suspend, or finish the current thread stop with `guest_scheduling_required`.
 Guest callbacks, additional queued threads, and some image/global-dependent paths
 need further execution support. Upstream unsupported branches and approximations
@@ -176,6 +176,87 @@ uses a 2 GiB address-space limit plus CPU/output limits. These are resource limi
 not an OS sandbox. Supplied operations receive guest addresses; they have no live
 MCP driver backend, automatic host filesystem import, or symbol-server downloads.
 The native Windows snapshot and explicit live-driver tools remain separate paths.
+
+## PE execution and numeric syscalls
+
+`emulate_windows_image` connects supplied AMD64 PE machine code to the KernEmul
+handlers. It maps the image, applies `DIR64` relocations, sets section permissions,
+resolves named imports to the guest model, and executes the entry point or an
+explicit `entry_rva`. No input image is loaded or executed by the host OS.
+
+The tool accepts:
+
+| Argument | Meaning |
+| --- | --- |
+| `image_hex` | Raw PE32+ AMD64 file bytes as hex, up to 2 MiB; mapped image up to 16 MiB. |
+| `kind` | `driver` (default) or `application`; chooses guest process/context. |
+| `base_address` | Optional page-aligned canonical guest address; defaults to PE ImageBase. Moving an image requires relocations. |
+| `entry_rva` | Optional executable RVA for a selected routine; defaults to the PE entry. |
+| `arguments` | Optional x64 arguments, up to 16. Scalars/hex strings or `{ "image_rva": 8192 }` for image-relative pointers. |
+| `registers` | Optional general-purpose register values using the same scalar/image-pointer forms. |
+| `watch` | Up to eight `{rva, size}` ranges, at most 4096 bytes each, returning before/after guest bytes. |
+| `syscalls` | Up to 512 explicit `{id, name, module?}` mappings; module defaults to `ntoskrnl.exe`. Names must be known `Nt` handlers. |
+| `syscall_stubs_hex` | Optional matching `ntdll.dll` PE bytes (up to 1 MiB), used to decode exported Nt service IDs. |
+| `instruction_limit` | 1–100,000, default 10,000, across all resumed execution. |
+| `trace_limit` | 1–512, default 128. |
+| `execution_timeout_ms` | Guest execution/handler deadline, 1–1000 ms, default 100. |
+| `timeout_ms` | Whole worker deadline, 100–10,000 ms, default 3000. |
+
+A driver entry receives modeled `DRIVER_OBJECT` and registry-path pointers in
+RCX/RDX. `arguments` and `registers` can override the initial call state for a
+selected routine. An application entry is called in a guest user process, without
+CRT/loader initialization. All calls return to a guest sentinel; the response
+reports `entry_return_value`, registers, instruction trace, API trace, imports,
+watched bytes, stop status, and the effective syscall map. A completed entry can
+return a failing NTSTATUS; inspect the raw value.
+
+For an agent with access to a driver's file bytes, construct a normal MCP call:
+
+```python
+from pathlib import Path
+request = {
+    "name": "emulate_windows_image",
+    "arguments": {
+        "image_hex": Path("my-driver.sys").read_bytes().hex(),
+        "kind": "driver",
+        "instruction_limit": 10000,
+        "execution_timeout_ms": 100,
+    },
+}
+# When the code uses syscall instructions, supply the matching guest build's
+# ntdll.dll, or explicit IDs obtained for that build:
+# request["arguments"]["syscall_stubs_hex"] = Path("matching-ntdll.dll").read_bytes().hex()
+```
+
+Imports bind to the original registered module handlers. `ntkrnlmp.exe` aliases
+`ntoskrnl.exe`; `ntdll.dll` can use the registered kernel handler names through
+its own guest trampolines. Unknown imports return `unresolved_import` with the
+module and name before code execution. Ordinal imports and additional native DLL
+loading are unsupported; no unknown import becomes a success stub.
+
+A trapped x64 `syscall` reads EAX for the service ID and R10 for argument one;
+remaining registers and stack arguments follow the Windows x64 contract. It
+invokes the selected original handler, then models the RCX/R11 clobbers and resumes
+at the next guest instruction. IDs are **never hardcoded for a presumed Windows
+version**. Matching supplied exports are decoded with KernEmul's canonical
+`mov r10, rcx; mov eax, service_id` stub decoder. Hooked/other stub shapes require
+an explicit mapping. Conflicting mappings and unknown handler names are rejected.
+Unmapped IDs stop at the syscall with `unsupported_syscall`, preserving a named
+trace containing the ID; no default NTSTATUS or fabricated return is supplied.
+
+The loader validates header, section, directory, thunk, string, export and
+relocation bounds before use. TLS callbacks, delayed imports, CLR images, and
+non-AMD64/small-alignment images are rejected. It does not supply Windows loader
+initialization, SEH dispatch, global kernel-image data, a guest thread scheduler,
+or synchronous guest callback execution. Pending waits stop with
+`guest_scheduling_required`; synchronous guest callbacks report a handler error.
+Unsupported upstream branches remain visible through returns and diagnostics.
+
+The image tool has an 8 MiB worker-request cap and uses the same bounded worker
+process and 1 MiB response limit as named batches. HTTP accepts at most 8 MiB;
+other Windows-operation requests retain their 128 KiB cap. The raw-code emulator
+retains its smaller code/mapping limits. All image memory and handler effects are
+guest-only; live-driver tools remain explicit separate operations.
 
 ## Windows API models and real host data
 
@@ -418,7 +499,10 @@ bridges, and actual native Windows system queries in Windows CI. The Windows
 runtime suite executes original KernEmul handlers for pool allocation/copy,
 process/thread lookup, event signaling, registry create/set/query, guest file
 write/read, device creation, user virtual-memory allocation/free, and state
-isolation. No suite
+isolation. A PE suite executes mapped AMD64 image fixtures, imported handlers,
+actual syscall instructions (including stack arguments), relocations, faults and
+budgets. Parser checks also cover truncated images and deterministic malformed
+input mutations. No suite
 exercises a real kernel driver.
 
 ## Run and connect

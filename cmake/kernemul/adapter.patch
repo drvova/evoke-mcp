@@ -1,8 +1,40 @@
+diff --git a/src/emu/guest_call.hpp b/src/emu/guest_call.hpp
+index 2707e39..53c8e1f 100644
+--- a/src/emu/guest_call.hpp
++++ b/src/emu/guest_call.hpp
+@@ -4,6 +4,7 @@
+ #include "emu.hpp"
+ #include <cstdint>
+ #include <mutex>
++#include <stdexcept>
+ #include <span>
+ #include <vector>
+ 
+@@ -21,9 +22,11 @@ inline void guest_tail_call(vcpu& cpu, const addr_t routine,
+ class guest_caller
+ {
+ public:
++    bool allow_guest_calls = true;
+ 	std::uint64_t call(vcpu& cpu, addr_t routine, std::span<const std::uint64_t> args,
+ 		std::size_t scratch = 0)
+ 	{
++        if (!allow_guest_calls) throw std::runtime_error("guest_callback_execution_unsupported");
+ 		const auto a = cpu.arch();
+ 		const auto regs = a->regs();
+ 		const auto& conv = *cpu.emu()->call_conv();
 diff --git a/src/kernel/kernel.hpp b/src/kernel/kernel.hpp
-index 3546df4..b3b4bfc 100644
+index 3546df4..e77bc3d 100644
 --- a/src/kernel/kernel.hpp
 +++ b/src/kernel/kernel.hpp
-@@ -123,6 +123,10 @@ protected:
+@@ -62,6 +62,7 @@ public:
+ 	emu& emu() { return *emu_; }
+ 	thread_scheduler& scheduler() { return scheduler_; }
+ 	std::shared_ptr<os_exception> excp() const { return excp_; }
++    void disable_guest_exceptions() { excp_.reset(); }
+ 
+ 	bool handle_exception(vcpu& cpu, cpu_exception ex)
+ 	{
+@@ -123,6 +124,10 @@ protected:
  
  struct kernel_state
  {
@@ -13,7 +45,7 @@ index 3546df4..b3b4bfc 100644
  	virtual ~kernel_state() = default;
  
  	virtual std::shared_ptr<process> create_process(std::string_view name) = 0;
-@@ -237,6 +241,7 @@ struct kernel_state
+@@ -237,6 +242,7 @@ struct kernel_state
  
  	void redirect(proc_module& mod, const std::string_view name, redirect_fn fn)
  	{
@@ -21,7 +53,7 @@ index 3546df4..b3b4bfc 100644
  		if (!try_redirect(mod, name, std::move(fn)))
  			LOG_ERR("symbol '{}' not found in {}", name, mod.name);
  	}
-@@ -244,6 +249,14 @@ struct kernel_state
+@@ -244,6 +250,14 @@ struct kernel_state
  	template <typename F>
  	void redirect(proc_module& mod, const std::string_view name, F&& fn)
  	{
@@ -35,6 +67,24 @@ index 3546df4..b3b4bfc 100644
 +        }
  		redirect(mod, name, make_redirect(emu_->call_conv(), std::forward<F>(fn)));
  	}
+ 
+diff --git a/src/kernel/process.hpp b/src/kernel/process.hpp
+index 4940893..920fba7 100644
+--- a/src/kernel/process.hpp
++++ b/src/kernel/process.hpp
+@@ -123,6 +123,13 @@ public:
+ 	virtual void module_add_cb([[maybe_unused]] proc_module& mod) { }
+ 
+ 	std::shared_ptr<proc_module> add_module(std::string_view name, addr_t addr, const pe::image* pe);
++    // Evoke adapter: register already validated guest images or synthetic import modules.
++    void register_emulated_module(std::shared_ptr<proc_module> mod) {
++        mod->lookup_name = ascii_lower(mod->name);
++        std::unique_lock lock(modules_mtx_);
++        if (modules_.contains(mod->lookup_name)) throw std::runtime_error("duplicate_guest_module");
++        modules_[mod->lookup_name] = mod;
++    }
+ 	[[nodiscard]] std::shared_ptr<proc_module> find_module(std::string_view name) const;
+ 	[[nodiscard]] std::shared_ptr<proc_module> find_module_by_addr(addr_t addr) const;
  
 diff --git a/src/kernel/win/win_kernel.hpp b/src/kernel/win/win_kernel.hpp
 index 360d119..9a17452 100644

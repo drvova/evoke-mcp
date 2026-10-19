@@ -1,5 +1,5 @@
 {
   "name": "evoke-mcp",
-  "version-string": "2.4.0",
+  "version-string": "2.5.0",
   "dependencies": ["nlohmann-json", "unicorn", "openssl"]
 }

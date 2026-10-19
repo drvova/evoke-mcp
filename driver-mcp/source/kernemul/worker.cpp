@@ -4,6 +4,8 @@
 #include "kernel/win/x86_win.hpp"
 #include "emu/x86/calling_conv.hpp"
 #include "emu/guest_emu.hpp"
+#include "pe_image.hpp"
+#include "execution_engine.hpp"
 #include <spdlog/sinks/base_sink.h>
 #include <algorithm>
 #include <charconv>
@@ -37,8 +39,8 @@ void fields(const json& j, std::initializer_list<const char*> allowed) {
         if (!found) throw std::invalid_argument("unexpected_argument: "+x.key());
     }
 }
-std::vector<std::uint8_t> decode(const std::string& text) {
-    if (text.size()%2 || text.size()>32768) throw std::invalid_argument("invalid_buffer_hex");
+std::vector<std::uint8_t> decode(const std::string& text,std::size_t maximum=16384) {
+    if (text.size()%2 || text.size()/2>maximum) throw std::invalid_argument("invalid_buffer_hex");
     std::vector<std::uint8_t> data;
     auto nibble=[](char c)->unsigned {if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;throw std::invalid_argument("invalid_buffer_hex");};
     for (std::size_t i=0;i<text.size();i+=2) data.push_back(static_cast<std::uint8_t>(nibble(text[i])*16+nibble(text[i+1])));
@@ -104,8 +106,9 @@ struct runtime {
         }
         return {{"operations",entries},{"total_registered",handlers.size()},{"nt_handlers",nt},{"zw_aliases",zw},
             {"filtered_total",filtered},{"next_offset",offset+entries.size()<filtered?json(offset+entries.size()):json(nullptr)},
-            {"numeric_syscall_dispatch",false},{"upstream_revision",EVOKE_KERNEMUL_REVISION}};
+            {"numeric_syscall_dispatch",true},{"syscall_mapping_required",true},{"upstream_revision",EVOKE_KERNEMUL_REVISION}};
     }
+#include "image_runtime.inc"
     struct buffer {std::uint64_t addr;std::vector<std::uint8_t> bytes;};
     json run(const json& args) {
         fields(args,{"context","buffers","operations","patches","reads","timeout_ms"});
@@ -210,8 +213,7 @@ struct runtime {
     }
 };
 }
-int main(int argc,char** argv) {
-    if(argc!=3)return 2;
+int process_request(const std::filesystem::path& input_path,const std::filesystem::path& output_path) {
 #ifndef _WIN32
     const rlimit memory_limit{2ULL*1024*1024*1024,2ULL*1024*1024*1024};
     const rlimit file_limit{1024*1024,1024*1024};
@@ -221,14 +223,22 @@ int main(int argc,char** argv) {
     auto sink=std::make_shared<log_sink>();auto logger=std::make_shared<spdlog::logger>("kernemul",sink);spdlog::set_default_logger(logger);
     json out;
     try {
-        std::ifstream input(argv[1],std::ios::binary);std::string text((std::istreambuf_iterator<char>(input)),{});
-        if(!input||text.size()>131072)throw std::invalid_argument("invalid_worker_input");
+        if(std::filesystem::file_size(input_path)>8*1024*1024)throw std::invalid_argument("invalid_worker_input");
+        std::ifstream input(input_path,std::ios::binary);std::string text((std::istreambuf_iterator<char>(input)),{});
+        if(!input||text.size()>8*1024*1024)throw std::invalid_argument("invalid_worker_input");
         const auto request=json::parse(text);fields(request,{"action","arguments"});runtime machine;
         const auto action=request.at("action").get<std::string>();
         if(action=="catalog")out=machine.catalog(request.at("arguments"));
+        else if(action=="image")out=machine.execute_image(request.at("arguments"));
         else if(action=="run")out=machine.run(request.at("arguments"));
         else throw std::invalid_argument("unknown_worker_action");
     } catch(const std::exception& error) {out={{"status","worker_error"},{"error",error.what()},{"source","kernemul"}};}
     out["diagnostics"]=sink->entries;out["diagnostics_truncated"]=sink->truncated;
-    std::ofstream output(argv[2],std::ios::binary|std::ios::trunc);output<<out.dump();return output.good()?0:3;
+    std::ofstream output(output_path,std::ios::binary|std::ios::trunc);output<<out.dump();return output.good()?0:3;
 }
+
+#ifdef _WIN32
+int wmain(int argc,wchar_t** argv) {return argc==3?process_request(argv[1],argv[2]):2;}
+#else
+int main(int argc,char** argv) {return argc==3?process_request(argv[1],argv[2]):2;}
+#endif
