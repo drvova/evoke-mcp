@@ -1,0 +1,44 @@
+{
+  "kernemul": {
+    "repo": "noahware/kernemul",
+    "commit": "cf3aedc6cc1755d2fedad77dcd4671bf045f9de8",
+    "url": "https://codeload.github.com/noahware/kernemul/tar.gz/cf3aedc6cc1755d2fedad77dcd4671bf045f9de8",
+    "sha256": "c96661d4d6a3611d5a827dbab2abcbfe1c4eab00e357d0deb363274ef5bf3bf9"
+  },
+  "unicorn": {
+    "repo": "unicorn-engine/unicorn",
+    "commit": "7c5db94191defc1e04a4f66f4eb1220903cba837",
+    "url": "https://codeload.github.com/unicorn-engine/unicorn/tar.gz/7c5db94191defc1e04a4f66f4eb1220903cba837",
+    "sha256": "fdb32665980dbd1486c58be8776894ce071b13f458d1437bad1fda0d49f0f7f0"
+  },
+  "pe": {
+    "repo": "noahware/pe",
+    "commit": "d7804f9794f23852ade76d40a0990453ab8215fd",
+    "url": "https://codeload.github.com/noahware/pe/tar.gz/d7804f9794f23852ade76d40a0990453ab8215fd",
+    "sha256": "ec11a2603fe4f14981831c761d9b8113c4e03cd7046bb18f4928bbbb74317e51"
+  },
+  "ia32": {
+    "repo": "ia32-doc/ia32-doc",
+    "commit": "efdea98d09f95ba5c05ae4ab9a5e6837e35183b7",
+    "url": "https://codeload.github.com/ia32-doc/ia32-doc/tar.gz/efdea98d09f95ba5c05ae4ab9a5e6837e35183b7",
+    "sha256": "77692dd8f9727eafb1420d36e378f3533b30dfadb5d574f6f794004e0c6b562c"
+  },
+  "raw_pdb": {
+    "repo": "MolecularMatters/raw_pdb",
+    "commit": "43cc59b7037238ad84e1d5abe10711a06d998fa0",
+    "url": "https://codeload.github.com/MolecularMatters/raw_pdb/tar.gz/43cc59b7037238ad84e1d5abe10711a06d998fa0",
+    "sha256": "b241645418d2a3eb67b335b8fccf48b53d95f10cee796384b0fa6fc3c418fd06"
+  },
+  "spdlog": {
+    "repo": "gabime/spdlog",
+    "commit": "6fa36017cfd5731d617e1a934f0e5ea9c4445b13",
+    "url": "https://codeload.github.com/gabime/spdlog/tar.gz/6fa36017cfd5731d617e1a934f0e5ea9c4445b13",
+    "sha256": "5097fb362e79a2bd7247beaf1f8377ed60e274fbe83a4b33e7b73383f0279022"
+  },
+  "capstone": {
+    "repo": "capstone-engine/capstone",
+    "version": "5.0.6",
+    "url": "https://codeload.github.com/capstone-engine/capstone/tar.gz/refs/tags/5.0.6",
+    "sha256": "240ebc834c51aae41ca9215d3190cc372fd132b9c5c8aa2d5f19ca0c325e28f9"
+  }
+}

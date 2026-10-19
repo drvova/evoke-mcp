@@ -10,8 +10,29 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y g++-14 libssl-dev
+      - name: Configure Linux
+        if: runner.os == 'Linux'
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=gcc-14 -DCMAKE_CXX_COMPILER=g++-14
+      - name: Cache Windows dependencies
+        if: runner.os == 'Windows'
+        id: windows-deps
+        uses: actions/cache/restore@v4
+        with:
+          path: C:/Users/runneradmin/AppData/Local/vcpkg/archives
+          key: openssl-${{ runner.os }}-${{ hashFiles('cmake/kernemul/vcpkg.json') }}
+      - name: Configure Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cmake -S . -B build -A x64 -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_MANIFEST_DIR="$PWD/cmake/kernemul"
+      - name: Save Windows dependency cache
+        if: always() && runner.os == 'Windows' && steps.windows-deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:/Users/runneradmin/AppData/Local/vcpkg/archives
+          key: openssl-${{ runner.os }}-${{ hashFiles('cmake/kernemul/vcpkg.json') }}
       - name: Build
         run: cmake --build build --config Debug --parallel 2
       - name: Test

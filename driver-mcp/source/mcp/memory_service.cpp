@@ -95,13 +95,24 @@ namespace mcp_runtime {
         std::size_t width(const std::string& type) {
             return dispatch(type, []<class T>() -> std::size_t { return sizeof(T); });
         }
+        void validate_range(std::uint64_t addr, std::uint64_t size) {
+            constexpr std::uint64_t maximum = 0x00007fffffffffffULL;
+            if (!size || size > maximum || addr < 0x10000 || addr > maximum - (size - 1))
+                throw std::invalid_argument("invalid_user_address_range");
+        }
         std::uint64_t address(const json& args, std::size_t size) {
             const auto result = unsigned_integer(args.at("addr"));
-            // Reject NULL, kernel/noncanonical addresses, and transfers crossing the user boundary.
-            constexpr std::uint64_t max_user_address = 0x00007fffffffffffULL;
-            if (result < 0x10000 || result > max_user_address - (size - 1))
-                throw std::invalid_argument("invalid_user_address");
+            validate_range(result, size);
             return result;
+        }
+        page_protection parse_protection(const json& value) {
+            const auto name = value.get<std::string>();
+            for (const auto& [text, protection] : std::initializer_list<std::pair<const char*, page_protection>>{
+                {"no_access", page_protection::no_access}, {"read_only", page_protection::read_only},
+                {"read_write", page_protection::read_write}, {"execute", page_protection::execute},
+                {"execute_read", page_protection::execute_read}, {"execute_read_write", page_protection::execute_read_write}})
+                if (name == text) return protection;
+            throw std::invalid_argument("invalid_page_protection");
         }
         std::string hex(const bytes& data) {
             std::ostringstream stream;
@@ -132,6 +143,176 @@ namespace mcp_runtime {
           now_(std::move(now)), ttl_(ttl), capacity_(capacity) {
         if (!next_id_ || !now_ || ttl_ <= std::chrono::seconds::zero() || capacity_ == 0)
             throw std::invalid_argument("invalid_service_configuration");
+    }
+
+    void memory_service::require_operation(driver_operation operation) {
+        if (!backend_.supports(operation)) throw std::runtime_error("operation_not_supported_by_adapter");
+    }
+
+    json memory_service::control(const char* operation, json details, const std::function<json()>& action) {
+        // Caller holds mutex_ across the audit sink, backend operation, and patch invalidation.
+        details["operation"] = operation;
+        details["operation_id"] = next_id_();
+        details["operation_attempted"] = false;
+        details["ok"] = false;
+        auto timestamp = [&] {
+            details["timestamp_unix_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+        };
+        details["status"] = "operation_started";
+        timestamp();
+        if (audit_) {
+            try { audit_(details); }
+            catch (...) { return make_tool_result("audit_unavailable_no_operation", {
+                {"status", "audit_unavailable_no_operation"}, {"operation", operation},
+                {"operation_id", details["operation_id"]}, {"operation_attempted", false}, {"ok", false}}, true); }
+        }
+        // A lifecycle or memory-map operation may invalidate an existing preview even
+        // if its driver call fails. Never allow those previews to be reused.
+        patches_.clear();
+        details["operation_attempted"] = true;
+        try { details.update(action()); }
+        catch (const std::exception& exception) { details["status"] = exception.what(); }
+        timestamp();
+        bool audit_failed = false;
+        if (audit_) {
+            try { audit_(details); }
+            catch (...) { details["audit_error"] = "audit_sink_failed"; audit_failed = true; }
+        }
+        return make_tool_result(details.at("status").get<std::string>(), details,
+                                !details.at("ok").get<bool>() || audit_failed);
+    }
+
+    json memory_service::driver_status(const json& args) {
+        fields(args, {});
+        std::lock_guard lock(mutex_);
+        std::erase_if(patches_, [&](const auto& item) { return item.second.expires <= now_(); });
+        json operations = json::array({"get_driver_status", "read_memory", "prepare_memory_patch", "apply_memory_patch", "get_base_address"});
+        for (const auto& [operation, name] : std::initializer_list<std::pair<driver_operation, const char*>>{
+            {driver_operation::connect, "connect_driver"}, {driver_operation::attach, "attach_process"},
+            {driver_operation::detach, "detach_process"}, {driver_operation::query_process, "get_process_info"},
+            {driver_operation::allocate, "allocate_memory"}, {driver_operation::protect, "protect_memory"},
+            {driver_operation::unload, "unload_driver"}})
+            if (backend_.supports(operation)) operations.push_back(name);
+        const auto target = backend_.identity();
+        return make_tool_result("driver_status", {
+            {"adapter", std::string(backend_.name())}, {"driver_available", backend_.connected()},
+            {"target", target ? target_json(*target) : json(nullptr)}, {"supported_operations", operations},
+            {"execution_exposed", false}, {"emulation_available", true}, {"capabilities_source", "adapter_declarations_not_runtime_probe"},
+            {"pending_patches", patches_.size()}
+        });
+    }
+
+    json memory_service::connect_driver(const json& args) {
+        fields(args, {});
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::connect);
+        return control("connect_driver", json::object(), [&] {
+            if (!backend_.connect()) throw std::runtime_error("driver_connect_failed");
+            return json{{"status", "driver_connected"}, {"ok", true}};
+        });
+    }
+
+    json memory_service::attach_process(const json& args) {
+        fields(args, {"pid"});
+        const auto pid = unsigned_integer(args.at("pid"));
+        if (pid == 0 || pid > std::numeric_limits<std::uint32_t>::max()) throw std::invalid_argument("invalid_pid");
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::attach);
+        return control("attach_process", {{"pid", pid}}, [&] {
+            if (!backend_.attach(static_cast<std::uint32_t>(pid))) throw std::runtime_error("driver_attach_failed");
+            const auto target = require_target(backend_);
+            if (target.pid != pid) throw std::runtime_error("attached_pid_mismatch");
+            return json{{"status", "process_attached"}, {"ok", true}, {"target", target_json(target)}};
+        });
+    }
+
+    json memory_service::detach_process(const json& args) {
+        fields(args, {});
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::detach);
+        return control("detach_process", json::object(), [&] {
+            if (!backend_.detach()) throw std::runtime_error("driver_detach_failed");
+            return json{{"status", "process_detached"}, {"ok", true}};
+        });
+    }
+
+    json memory_service::process_info(const json& args) {
+        fields(args, {});
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::query_process);
+        const auto target = require_target(backend_);
+        process_information info;
+        if (!backend_.query_process(info)) throw std::runtime_error("driver_query_failed");
+        if (backend_.identity() != target) throw std::runtime_error("target_changed");
+        // String encoding preserves full-width DTB and PEB values in JavaScript clients.
+        return make_tool_result("process_info", {{"target", target_json(target)},
+            {"peb", std::to_string(info.peb)}, {"dtb", std::to_string(info.dtb)}});
+    }
+
+    json memory_service::allocate_memory(const json& args) {
+        fields(args, {"size", "protection"});
+        const auto requested = unsigned_integer(args.at("size"));
+        validate_range(0x10000, requested);
+        const auto protection = parse_protection(args.at("protection"));
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::allocate);
+        const auto target = require_target(backend_);
+        return control("allocate_memory", {{"target", target_json(target)}, {"requested_size", requested},
+            {"protection", args.at("protection")}}, [&] {
+            if (backend_.identity() != target) throw std::runtime_error("target_changed");
+            std::uint64_t addr = 0, size = requested;
+            if (!backend_.allocate(addr, size, protection)) throw std::runtime_error("driver_allocate_failed");
+            // Preserve reported outputs even when validation detects a bad driver response.
+            json out = {{"addr", addr}, {"size", size}, {"driver_reported_success", true}, {"ok", false}};
+            if (backend_.identity() != target) { out["status"] = "target_changed_after_operation"; return out; }
+            try { validate_range(addr, size); }
+            catch (...) { out["status"] = "invalid_driver_allocation_range"; return out; }
+            if (size < requested) { out["status"] = "driver_allocation_too_small"; return out; }
+            out["status"] = "memory_allocated";
+            out["ok"] = true;
+            return out;
+        });
+    }
+
+    json memory_service::protect_memory(const json& args) {
+        fields(args, {"addr", "size", "protection"});
+        const auto addr = unsigned_integer(args.at("addr"));
+        const auto size = unsigned_integer(args.at("size"));
+        validate_range(addr, size);
+        const auto protection = parse_protection(args.at("protection"));
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::protect);
+        const auto target = require_target(backend_);
+        return control("protect_memory", {{"target", target_json(target)}, {"requested_addr", addr},
+            {"requested_size", size}, {"protection", args.at("protection")}}, [&] {
+            if (backend_.identity() != target) throw std::runtime_error("target_changed");
+            auto actual_addr = addr, actual_size = size;
+            std::uint32_t previous = 0;
+            if (!backend_.protect(actual_addr, actual_size, protection, previous)) throw std::runtime_error("driver_protect_failed");
+            json out = {{"addr", actual_addr}, {"size", actual_size}, {"previous_native_protection", previous},
+                {"driver_reported_success", true}, {"ok", false}};
+            if (backend_.identity() != target) { out["status"] = "target_changed_after_operation"; return out; }
+            try { validate_range(actual_addr, actual_size); }
+            catch (...) { out["status"] = "invalid_driver_protection_range"; return out; }
+            if (actual_addr > addr || actual_addr + actual_size < addr + size) {
+                out["status"] = "driver_protection_range_mismatch";
+                return out;
+            }
+            out["status"] = "memory_protection_changed";
+            out["ok"] = true;
+            return out;
+        });
+    }
+
+    json memory_service::unload_driver(const json& args) {
+        fields(args, {});
+        std::lock_guard lock(mutex_);
+        require_operation(driver_operation::unload);
+        return control("unload_driver", json::object(), [&] {
+            if (!backend_.unload()) throw std::runtime_error("driver_unload_failed");
+            return json{{"status", "driver_unloaded"}, {"ok", true}};
+        });
     }
 
     json memory_service::get_base(const json& args) {

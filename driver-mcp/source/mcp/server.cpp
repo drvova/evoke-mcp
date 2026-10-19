@@ -1,4 +1,5 @@
 #include "server.hpp"
+#include "system_drivers.hpp"
 #include <stdexcept>
 
 namespace mcp_runtime {
@@ -25,11 +26,162 @@ namespace mcp_runtime {
             "byte", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "float", "double"})}};
         const json addr = {{"type", "integer"}, {"minimum", 65536}, {"maximum", 140737488355327LL},
             {"description", "Target user virtual address. Transfers must fit below the user address boundary."}};
+        const json size = {{"type", "integer"}, {"minimum", 1}, {"maximum", 140737488289792LL}};
+        const json protection = {{"type", "string"}, {"enum", json::array({
+            "no_access", "read_only", "read_write", "execute", "execute_read", "execute_read_write"})}};
         auto schema = [](json properties, json required) {
             return json{{"type", "object"}, {"properties", properties},
                         {"required", required}, {"additionalProperties", false}};
         };
+        const json emulation_integer = {{"oneOf", json::array({
+            {{"type", "integer"}, {"minimum", 0}},
+            {{"type", "string"}, {"pattern", "^(0x[0-9a-fA-F]+|[0-9]+)$"}}
+        })}};
+        const json emulation_registers = {{"type", "object"}, {"additionalProperties", false}, {"properties", json::object()}};
+        auto register_schema = emulation_registers;
+        for (auto name : {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rflags", "fs_base", "gs_base"})
+            register_schema["properties"][name] = emulation_integer;
+        const auto buffer_ref = schema({{"buffer", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+            {"offset", emulation_integer}}, {"buffer"});
+        const json operation_argument = {{"oneOf", json::array({emulation_integer, buffer_ref,
+            schema({{"result", {{"type", "integer"}, {"minimum", 0}, {"maximum", 63}}}}, {"result"}),
+            schema({{"read_u64", buffer_ref}}, {"read_u64"})})}};
+        const json image_argument = {{"oneOf", json::array({emulation_integer,
+            schema({{"image_rva", {{"type", "integer"}, {"minimum", 0}, {"maximum", 16777215}}}}, {"image_rva"})})}};
+        auto image_registers = register_schema;
+        image_registers["properties"].erase("fs_base");image_registers["properties"].erase("gs_base");
+        for (auto& property : image_registers["properties"].items()) property.value() = image_argument;
+        auto image_schema = [&](json properties) {
+            auto value = schema(std::move(properties), json::array());
+            value["oneOf"] = json::array({{{"required", {"image_hex"}}}, {{"required", {"image_path"}}}});
+            value["not"] = {{"required", {"syscall_stubs_hex", "syscall_stubs_path"}}};
+            return value;
+        };
+        auto discovery_schema = image_schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+            {"image_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}}},
+            {"service_name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 256}, {"description", "Windows driver service name; resolves its configured image through read-only SCM queries."}}},
+            {"base_address", emulation_integer},
+            {"analysis_instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 32768}, {"default", 8192}}},
+            {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
+            {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
+            {"execution_timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1000}, {"default", 100}}},
+            {"timeout_ms", {{"type", "integer"}, {"minimum", 100}, {"maximum", 10000}, {"default", 3000}}}
+        });
+        discovery_schema.erase("not");discovery_schema["oneOf"] = json::array();
+        for(auto field:{"image_hex","image_path","service_name"}) {
+            json others=json::array();for(auto other:{"image_hex","image_path","service_name"})if(std::string_view(field)!=other)others.push_back({{"required",{other}}});
+            discovery_schema["oneOf"].push_back({{"required",{field}},{"not",{{"anyOf",others}}}});
+        }
         tools_ = {
+            {"list_system_drivers", "Read Windows kernel/filesystem driver services and their configured binary paths through SCM. Filter by exact service name or paginate. Running service state is reported; association with a particular device is not proven. No loading, starting, stopping or device probing.",
+                schema({{"name",{{"type","string"},{"minLength",1},{"maxLength",256}}},
+                    {"offset",{{"type","integer"},{"minimum",0},{"maximum",4096}}},
+                    {"limit",{{"type","integer"},{"minimum",1},{"maximum",200},{"default",100}}}},json::array()),
+                true, [](const json& args){return list_system_drivers(args);}},
+            {"discover_driver_contract", "Auto-detect Windows x86, AMD64 or ARM64 drivers for bounded architecture-specific contract analysis. AMD64 additionally supports modeled DriverEntry execution. Discover registered dispatch routines, IOCTL candidates with IO_STACK_LOCATION dataflow evidence, length comparisons, buffer accesses and device-name hints. Return a SHA-256-bound partial contract with provenance and initialization stop reasons. Does not probe live devices or activate an inferred live adapter.",
+                discovery_schema, true, [this](const json& args) { return windows_.discover_contract(args); }},
+            {"emulate_windows_image", "Load and execute a supplied AMD64 PE entry point or routine in the bounded KernEmul guest. Resolve named imports to original handlers; trap numeric syscalls using explicit mappings or matching supplied ntdll stubs. Return registers, traces and watched guest bytes. DriverEntry gets modeled driver arguments. No native image loading or live-driver execution; unsupported imports/features stop explicitly.",
+                image_schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                    {"image_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}, {"description", "Server-local regular PE file; mutually exclusive with image_hex. Read inside the bounded worker."}}},
+                    {"kind", {{"type", "string"}, {"enum", json::array({"driver", "application"})}, {"default", "driver"}}},
+                    {"base_address", emulation_integer}, {"entry_rva", {{"type", "integer"}, {"minimum", 0}, {"maximum", 16777215}}},
+                    {"arguments", {{"type", "array"}, {"maxItems", 16}, {"items", image_argument}}}, {"registers", image_registers},
+                    {"watch", {{"type", "array"}, {"maxItems", 8}, {"items", schema({
+                        {"rva", {{"type", "integer"}, {"minimum", 0}}}, {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4096}}}
+                    }, {"rva", "size"})}}},
+                    {"syscalls", {{"type", "array"}, {"maxItems", 512}, {"items", schema({
+                        {"id", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295ULL}}},
+                        {"module", {{"type", "string"}, {"default", "ntoskrnl.exe"}}}, {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}}
+                    }, {"id", "name"})}}},
+                    {"syscall_stubs_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}}},
+                    {"syscall_stubs_hex", {{"type", "string"}, {"maxLength", 8388608}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                    {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
+                    {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
+                    {"execution_timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1000}, {"default", 100}}},
+                    {"timeout_ms", {{"type", "integer"}, {"minimum", 100}, {"maximum", 10000}, {"default", 3000}}}
+                }), true,
+                [this](const json& args) { return windows_.image(args); }},
+            {"get_windows_emulation_info", "Report the bundled KernEmul Windows handler runtime, bounds, invocation mode and limitations. No live system or driver operations.",
+                schema(json::object(), json::array()), true,
+                [this](const json& args) { return windows_.info(args); }},
+            {"list_windows_operations", "Enumerate actual registered KernEmul implementations across kernel modules, including Nt/Zw syscall handlers. Returns argument counts, provenance, exact runtime counts and pagination. Does not imply complete native fidelity.",
+                schema({{"module", {{"type", "string"}}}, {"name", {{"type", "string"}}},
+                    {"syscalls_only", {{"type", "boolean"}}}, {"offset", {{"type", "integer"}, {"minimum", 0}}},
+                    {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 200}, {"default", 100}}}}, json::array()), true,
+                [this](const json& args) { return windows_.catalog(args); }},
+            {"emulate_windows_operations", "Execute named original KernEmul handlers in a fresh Windows guest model, preserving guest state across up to 64 operations. Supports buffers, prior results and guest handle references; returns effects, raw return values and upstream diagnostics. Nt/Zw calls use their names, without numeric syscall dispatch or PE execution. Guest state only; no live-driver access.",
+                schema({{"context", {{"type", "string"}, {"enum", json::array({"kernel", "user"})}, {"default", "kernel"}}},
+                    {"timeout_ms", {{"type", "integer"}, {"minimum", 100}, {"maximum", 10000}, {"default", 3000}}},
+                    {"buffers", {{"type", "array"}, {"maxItems", 32}, {"items", schema({
+                        {"id", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+                        {"bytes_hex", {{"type", "string"}, {"maxLength", 32768}, {"pattern", "^([0-9a-fA-F]{2})*$"}}},
+                        {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 16384}}}
+                    }, {"id"})}}},
+                    {"operations", {{"type", "array"}, {"minItems", 1}, {"maxItems", 64}, {"items", schema({
+                        {"module", {{"type", "string"}, {"default", "ntoskrnl.exe"}}}, {"name", {{"type", "string"}}},
+                        {"arguments", {{"type", "array"}, {"maxItems", 16}, {"items", operation_argument}}}
+                    }, {"name", "arguments"})}}},
+                    {"patches", {{"type", "array"}, {"maxItems", 64}, {"items", schema({
+                        {"buffer", {{"type", "string"}}}, {"offset", emulation_integer}, {"value", operation_argument}
+                    }, {"buffer", "offset", "value"})}}},
+                    {"reads", {{"type", "array"}, {"maxItems", 16}, {"items", schema({
+                        {"address", operation_argument}, {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 16384}}}
+                    }, {"address", "size"})}}}
+                }, {"operations"}), true,
+                [this](const json& args) { return windows_.run(args); }},
+            {"list_api_models", "List named emulated APIs and Windows host-snapshot bridges, with signatures, supported modules, availability, provenance, and fidelity limits. This is an explicit subset, not all Windows APIs.",
+                schema({{"module", {{"type", "string"}}}, {"name", {{"type", "string"}}}}, json::array()), true,
+                [this](const json& args) { return emulation_.api_catalog(args); }},
+            {"get_system_snapshot", "Read actual host Windows time, performance counters, uptime, system information, and memory status through supported Win32 APIs. Read-only; returns explicit unavailability on other hosts.",
+                schema(json::object(), json::array()), true,
+                [this](const json& args) { return emulation_.system_snapshot(args); }},
+            {"get_emulation_info", "Report the built-in Unicorn x86-64 emulator, limits, default stack, and availability of explicit API models and host-snapshot bridges. Available without a connected driver.",
+                schema(json::object(), json::array()), true,
+                [this](const json& args) { return emulation_.info(args); }},
+            {"emulate_region", "Emulate supplied x86-64 bytes with optional registers and guest memory. Return registers, instruction/memory traces, changed guest bytes, and a precise stop reason. Bind named APIs to guest models or read-only Windows snapshots using imports. Unsupported APIs, missing memory and external instructions stop execution; no live-driver access. Fresh state per call.",
+                schema({
+                    {"code_hex", {{"type", "string"}, {"minLength", 2}, {"maxLength", 32768}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                    {"address", emulation_integer}, {"entry_offset", emulation_integer}, {"registers", register_schema},
+                    {"imports", {{"type", "array"}, {"maxItems", 32}, {"items", schema({
+                        {"module", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
+                        {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}},
+                        {"address", emulation_integer},
+                        {"backend", {{"type", "string"}, {"enum", json::array({"model", "host_snapshot"})}}}
+                    }, {"module", "name", "address"})}}},
+                    {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
+                    {"timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 500}, {"default", 100}}},
+                    {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
+                    {"memory", {{"type", "array"}, {"maxItems", 8}, {"items", schema({
+                        {"address", emulation_integer},
+                        {"bytes_hex", {{"type", "string"}, {"minLength", 2}, {"maxLength", 8192}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                        {"permissions", {{"type", "string"}, {"enum", json::array({"r", "rw", "rx", "rwx"})}, {"default", "rw"}}}
+                    }, {"address", "bytes_hex"})}}}
+                }, {"code_hex"}), true,
+                [this](const json& args) { return emulation_.run(args); }},
+            {"get_driver_status", "Report adapter capabilities, driver availability, target identity, and pending previews. Capabilities are declarations, not a runtime ABI probe.",
+                schema(json::object(), json::array()), true,
+                [&memory](const json& args) { return memory.driver_status(args); }},
+            {"connect_driver", "Open the configured driver's device connection. Invalidates pending previews; does not install or load a driver.",
+                schema(json::object(), json::array()), false,
+                [&memory](const json& args) { return memory.connect_driver(args); }},
+            {"attach_process", "Attach the driver to an explicit PID and retain its process identity. Invalidates pending previews.",
+                schema({{"pid", {{"type", "integer"}, {"minimum", 1}, {"maximum", 4294967295ULL}}}}, {"pid"}), false,
+                [&memory](const json& args) { return memory.attach_process(args); }},
+            {"detach_process", "Detach from the current process. Invalidates pending previews.",
+                schema(json::object(), json::array()), false,
+                [&memory](const json& args) { return memory.detach_process(args); }},
+            {"get_process_info", "Read the attached process identity, PEB, and DTB. Full-width PEB/DTB are returned as decimal strings.",
+                schema(json::object(), json::array()), true,
+                [&memory](const json& args) { return memory.process_info(args); }},
+            {"allocate_memory", "Reserve and commit private memory in the attached process. Returns the driver's address and rounded size. Invalidates previews; does not execute code. Evoke defines no free operation.",
+                schema({{"size", size}, {"protection", protection}}, {"size", "protection"}), false,
+                [&memory](const json& args) { return memory.allocate_memory(args); }},
+            {"protect_memory", "Change memory protection in the attached process. Returns the driver's actual range and previous native protection. Invalidates previews; does not execute code.",
+                schema({{"addr", addr}, {"size", size}, {"protection", protection}}, {"addr", "size", "protection"}), false,
+                [&memory](const json& args) { return memory.protect_memory(args); }},
+            {"unload_driver", "Request driver unload, close the device on success, and invalidate pending previews. Reconnecting requires the driver to be loaded externally.",
+                schema(json::object(), json::array()), false,
+                [&memory](const json& args) { return memory.unload_driver(args); }},
             {"get_base_address", "Get the live attached process identity and image base.",
                 schema(json::object(), json::array()), true,
                 [&memory](const json& args) { return memory.get_base(args); }},
@@ -70,7 +222,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.0.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.7.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

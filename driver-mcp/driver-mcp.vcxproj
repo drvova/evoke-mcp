@@ -102,6 +102,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -118,6 +119,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -132,6 +134,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -148,6 +151,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
+      <AdditionalDependencies>advapi32.lib;unicorn.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
@@ -155,6 +159,11 @@
     <ClCompile Include="source\entry\main.cpp" />
     <ClCompile Include="source\mcp\server.cpp" />
     <ClCompile Include="source\mcp\memory_service.cpp" />
+    <ClCompile Include="source\mcp\api_models.cpp" />
+    <ClCompile Include="source\mcp\host_system.cpp" />
+    <ClCompile Include="source\mcp\windows_service.cpp" />
+    <ClCompile Include="source\mcp\system_drivers.cpp" />
+    <ClCompile Include="source\mcp\emulation_service.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\driver\communications.hpp" />
@@ -164,6 +173,11 @@
     <ClInclude Include="source\httplib\httplib.h" />
     <ClInclude Include="source\mcp\memory_backend.hpp" />
     <ClInclude Include="source\mcp\memory_service.hpp" />
+    <ClInclude Include="source\mcp\api_models.hpp" />
+    <ClInclude Include="source\mcp\host_system.hpp" />
+    <ClInclude Include="source\mcp\windows_service.hpp" />
+    <ClInclude Include="source\mcp\system_drivers.hpp" />
+    <ClInclude Include="source\mcp\emulation_service.hpp" />
     <ClInclude Include="source\mcp\http_security.hpp" />
     <ClInclude Include="source\mcp\routines\type_dispatch.hpp" />
     <ClInclude Include="source\driver\memory_backend.hpp" />
@@ -171,6 +185,20 @@
     <ClInclude Include="source\mcp\server.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="BuildKernEmulWorker" BeforeTargets="ClCompile" Condition="'$(Platform)'=='x64'">
+    <PropertyGroup>
+      <EvokeRepository>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))</EvokeRepository>
+      <EvokeWorkerBuild>$(EvokeRepository)\out\kernemul</EvokeWorkerBuild>
+      <EvokeToolchain Condition="Exists('$(VcpkgRoot)scripts\buildsystems\vcpkg.cmake')">-DCMAKE_TOOLCHAIN_FILE=&quot;$(VcpkgRoot)scripts\buildsystems\vcpkg.cmake&quot;</EvokeToolchain>
+    </PropertyGroup>
+    <Exec Command="cmake -S &quot;$(EvokeRepository)&quot; -B &quot;$(EvokeWorkerBuild)&quot; -A x64 $(EvokeToolchain) -DVCPKG_MANIFEST_DIR=&quot;$(EvokeRepository)\cmake\kernemul&quot;" />
+    <Exec Command="cmake --build &quot;$(EvokeWorkerBuild)&quot; --config $(Configuration) --target evoke-kernemul --parallel 2" />
+    <ItemGroup>
+      <EvokeWorkerFiles Include="$(EvokeWorkerBuild)\$(Configuration)\evoke-kernemul.exe;$(EvokeWorkerBuild)\$(Configuration)\*.dll" />
+    </ItemGroup>
+    <MakeDir Directories="$(OutDir)" />
+    <Copy SourceFiles="@(EvokeWorkerFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

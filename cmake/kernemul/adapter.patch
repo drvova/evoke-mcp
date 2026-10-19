@@ -1,0 +1,335 @@
+diff --git a/src/emu/guest_call.hpp b/src/emu/guest_call.hpp
+index 2707e39..53c8e1f 100644
+--- a/src/emu/guest_call.hpp
++++ b/src/emu/guest_call.hpp
+@@ -4,6 +4,7 @@
+ #include "emu.hpp"
+ #include <cstdint>
+ #include <mutex>
++#include <stdexcept>
+ #include <span>
+ #include <vector>
+ 
+@@ -21,9 +22,11 @@ inline void guest_tail_call(vcpu& cpu, const addr_t routine,
+ class guest_caller
+ {
+ public:
++    bool allow_guest_calls = true;
+ 	std::uint64_t call(vcpu& cpu, addr_t routine, std::span<const std::uint64_t> args,
+ 		std::size_t scratch = 0)
+ 	{
++        if (!allow_guest_calls) throw std::runtime_error("guest_callback_execution_unsupported");
+ 		const auto a = cpu.arch();
+ 		const auto regs = a->regs();
+ 		const auto& conv = *cpu.emu()->call_conv();
+diff --git a/src/kernel/kernel.hpp b/src/kernel/kernel.hpp
+index 3546df4..e77bc3d 100644
+--- a/src/kernel/kernel.hpp
++++ b/src/kernel/kernel.hpp
+@@ -62,6 +62,7 @@ public:
+ 	emu& emu() { return *emu_; }
+ 	thread_scheduler& scheduler() { return scheduler_; }
+ 	std::shared_ptr<os_exception> excp() const { return excp_; }
++    void disable_guest_exceptions() { excp_.reset(); }
+ 
+ 	bool handle_exception(vcpu& cpu, cpu_exception ex)
+ 	{
+@@ -123,6 +124,10 @@ protected:
+ 
+ struct kernel_state
+ {
++    // Evoke adapter: enumerate and invoke the original handlers without OS image exports.
++    using handler_observer_fn = std::function<void(proc_module&, std::string_view, redirect_fn, std::size_t, bool)>;
++    handler_observer_fn handler_observer;
++
+ 	virtual ~kernel_state() = default;
+ 
+ 	virtual std::shared_ptr<process> create_process(std::string_view name) = 0;
+@@ -237,6 +242,7 @@ struct kernel_state
+ 
+ 	void redirect(proc_module& mod, const std::string_view name, redirect_fn fn)
+ 	{
++        if (handler_observer) { handler_observer(mod, name, std::move(fn), 0, true); return; }
+ 		if (!try_redirect(mod, name, std::move(fn)))
+ 			LOG_ERR("symbol '{}' not found in {}", name, mod.name);
+ 	}
+@@ -244,6 +250,14 @@ struct kernel_state
+ 	template <typename F>
+ 	void redirect(proc_module& mod, const std::string_view name, F&& fn)
+ 	{
++        if (handler_observer) {
++            using traits = function_traits<std::decay_t<F>>;
++            using args = typename traits::args;
++            constexpr auto count = traits::arity - (detail::first_is_vcpu<args>() ? 1 : 0);
++            handler_observer(mod, name, make_redirect(emu_->call_conv(), std::forward<F>(fn)),
++                count, !std::is_void_v<typename traits::return_type>);
++            return;
++        }
+ 		redirect(mod, name, make_redirect(emu_->call_conv(), std::forward<F>(fn)));
+ 	}
+ 
+diff --git a/src/kernel/process.hpp b/src/kernel/process.hpp
+index 4940893..920fba7 100644
+--- a/src/kernel/process.hpp
++++ b/src/kernel/process.hpp
+@@ -123,6 +123,13 @@ public:
+ 	virtual void module_add_cb([[maybe_unused]] proc_module& mod) { }
+ 
+ 	std::shared_ptr<proc_module> add_module(std::string_view name, addr_t addr, const pe::image* pe);
++    // Evoke adapter: register already validated guest images or synthetic import modules.
++    void register_emulated_module(std::shared_ptr<proc_module> mod) {
++        mod->lookup_name = ascii_lower(mod->name);
++        std::unique_lock lock(modules_mtx_);
++        if (modules_.contains(mod->lookup_name)) throw std::runtime_error("duplicate_guest_module");
++        modules_[mod->lookup_name] = mod;
++    }
+ 	[[nodiscard]] std::shared_ptr<proc_module> find_module(std::string_view name) const;
+ 	[[nodiscard]] std::shared_ptr<proc_module> find_module_by_addr(addr_t addr) const;
+ 
+diff --git a/src/kernel/win/win_kernel.hpp b/src/kernel/win/win_kernel.hpp
+index 360d119..9a17452 100644
+--- a/src/kernel/win/win_kernel.hpp
++++ b/src/kernel/win/win_kernel.hpp
+@@ -78,7 +78,7 @@ struct win_kernel_state : kernel_state
+ 	// The guest's lists live in guest memory; a push rewrites the head and the old tail.
+ 	std::mutex list_mtx_;
+ 
+-	explicit win_kernel_state(const std::shared_ptr<class emu>& emu)
++	explicit win_kernel_state(const std::shared_ptr<class emu>& emu, bool load_host_files = true)
+ 		:	objs(*emu->default_addr_space()),
+ 			pool(*emu->default_addr_space()),
+ 			sys_proc(std::make_shared<win_kernel_proc>(objs.allocate_id(), *this, emu->default_addr_space()))
+@@ -93,9 +93,9 @@ struct win_kernel_state : kernel_state
+ 		modules::init_pfn_database(space);
+ 
+ 		// The host tree is laid out as the guest's drive, so a file sits where the guest names it.
+-		fs.load_dir(target::guest_fs_dir, root_dir_narrow);
++		if (load_host_files) fs.load_dir(target::guest_fs_dir, root_dir_narrow);
+ 
+-		const auto ntoskrnl = map_redirect_module("ntoskrnl.exe", modules::register_ntoskrnl);
++		const auto ntoskrnl = load_host_files ? map_redirect_module("ntoskrnl.exe", modules::register_ntoskrnl) : nullptr;
+ 
+ 		if (ntoskrnl)
+ 		{
+@@ -192,6 +192,11 @@ struct win_kernel_state : kernel_state
+ 	template <typename F>
+ 	void redirect_ntzw(proc_module& mod, const std::string_view base, F&& fn)
+ 	{
++        if (handler_observer) {
++            redirect(mod, "Nt" + std::string(base), fn);
++            redirect(mod, "Zw" + std::string(base), fn);
++            return;
++        }
+ 		const auto nt = "Nt" + std::string(base);
+ 		const auto zw = "Zw" + std::string(base);
+ 		const auto conv = emu_->call_conv();
+@@ -523,6 +528,15 @@ struct win_kernel_state : kernel_state
+ 	// complete type.
+ 	std::shared_ptr<process> create_process(std::string_view name) override;
+ 
++    // Evoke adapter: seed the process list when there are no Windows images.
++    void initialize_headless() {
++        if (active_process_list.address()) return;
++        auto& space = kernel_space();
++        const auto head = space.alloc(sizeof(_LIST_ENTRY), prot_rw | prot_supervisor);
++        active_process_list = active_process_list_t(space, head, "PsActiveProcessHead", true);
++        active_process_list.init();
++        sys_proc->set_eprocess(insert_process(space, sys_proc->id(), "System"));
++    }
+ private:
+ 	windows_emulator* emulator_ = nullptr;
+ 
+@@ -593,8 +607,8 @@ private:
+ class windows_emulator : public os_emulator
+ {
+ public:
+-	explicit windows_emulator(std::shared_ptr<class emu> emu)
+-		: os_emulator(std::move(emu)), kernel_(emu_)
++	explicit windows_emulator(std::shared_ptr<class emu> emu, bool load_host_files = true)
++		: os_emulator(std::move(emu)), kernel_(emu_, load_host_files)
+ 	{
+ 		kernel_.sys_proc->set_scheduler(&scheduler_);
+ 		kernel_.sys_proc->set_emulator(this);
+diff --git a/src/sym/pdb_server.hpp b/src/sym/pdb_server.hpp
+index 1b6a05b..d904172 100644
+--- a/src/sym/pdb_server.hpp
++++ b/src/sym/pdb_server.hpp
+@@ -3,13 +3,6 @@
+ 
+ #include <pe.hpp>
+ 
+-#include <boost/beast/core.hpp>
+-#include <boost/beast/http.hpp>
+-#include <boost/beast/ssl.hpp>
+-#include <boost/asio/connect.hpp>
+-#include <boost/asio/ip/tcp.hpp>
+-#include <boost/asio/ssl/stream.hpp>
+-
+ #include <filesystem>
+ #include <format>
+ #include <fstream>
+@@ -19,12 +12,6 @@
+ namespace pdb_server
+ {
+ 
+-namespace beast = boost::beast;
+-namespace http = beast::http;
+-namespace net = boost::asio;
+-namespace ssl = net::ssl;
+-using tcp = net::ip::tcp;
+-
+ inline std::string format_guid(const pe::guid& g)
+ {
+ 	return std::format("{:08X}{:04X}{:04X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
+@@ -53,150 +40,5 @@ inline std::filesystem::path cached_path(const pe::codeview_rsds& cv)
+ 	return std::filesystem::path("symbols") / name / build_key(cv) / name;
+ }
+ 
+-inline void close_stream(beast::ssl_stream<beast::tcp_stream>& stream)
+-{
+-	beast::error_code ec;
+-	beast::get_lowest_layer(stream).socket().shutdown(tcp::socket::shutdown_both, ec);
+-	beast::get_lowest_layer(stream).close();
+-}
+-
+-inline void parse_redirect_url(
+-	const std::string_view location,
+-	std::string& host,
+-	std::string& target)
+-{
+-	const auto scheme_end = location.find("://");
+-
+-	if (scheme_end == std::string_view::npos)
+-	{
+-		target = location;
+-		return;
+-	}
+-
+-	const auto host_start = scheme_end + 3;
+-	const auto path_start = location.find('/', host_start);
+-
+-	if (path_start == std::string_view::npos)
+-	{
+-		host = location.substr(host_start);
+-		target = "/";
+-	}
+-	else
+-	{
+-		host = location.substr(host_start, path_start - host_start);
+-		target = location.substr(path_start);
+-	}
+-}
+-
+-inline std::vector<std::uint8_t> https_get(
+-	const std::string_view host,
+-	const std::string_view target,
+-	const std::uint32_t max_redirects = 5)
+-{
+-	net::io_context ioc;
+-
+-	ssl::context ctx(ssl::context::tlsv12_client);
+-	ctx.set_default_verify_paths();
+-	ctx.set_verify_mode(ssl::verify_none);
+-
+-	std::string current_host(host);
+-	std::string current_target(target);
+-
+-	for (std::uint32_t redirect = 0; redirect <= max_redirects; ++redirect)
+-	{
+-		tcp::resolver resolver(ioc);
+-		beast::ssl_stream<beast::tcp_stream> stream(ioc, ctx);
+-
+-		SSL_set_tlsext_host_name(stream.native_handle(), current_host.c_str());
+-
+-		beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(30));
+-		beast::get_lowest_layer(stream).connect(resolver.resolve(current_host, "443"));
+-		stream.handshake(ssl::stream_base::client);
+-
+-		beast::get_lowest_layer(stream).expires_after(std::chrono::seconds(120));
+-
+-		http::request<http::empty_body> req(http::verb::get, current_target, 11);
+-		req.set(http::field::host, current_host);
+-		req.set(http::field::user_agent, "Microsoft-Symbol-Server/10.0.0.0");
+-		http::write(stream, req);
+-
+-		beast::flat_buffer buffer;
+-		http::response_parser<http::dynamic_body> parser;
+-		parser.body_limit(std::numeric_limits<std::uint64_t>::max());
+-		http::read(stream, buffer, parser);
+-
+-		auto response = parser.release();
+-		const auto status = response.result_int();
+-
+-		if (status >= 300 && status < 400)
+-		{
+-			const auto location = response[http::field::location];
+-
+-			if (location.empty())
+-				return {};
+-
+-			parse_redirect_url(std::string_view(location), current_host, current_target);
+-			close_stream(stream);
+-			continue;
+-		}
+-
+-		if (response.result() != http::status::ok)
+-		{
+-			close_stream(stream);
+-			return {};
+-		}
+-
+-		const auto body_str = beast::buffers_to_string(response.body().data());
+-		close_stream(stream);
+-
+-		return { body_str.begin(), body_str.end() };
+-	}
+-
+-	return {};
+-}
+-
+-inline std::filesystem::path download(const pe::codeview_rsds& cv)
+-{
+-	auto dest = cached_path(cv);
+-
+-	if (std::filesystem::exists(dest))
+-		return dest;
+-
+-	auto name = pdb_file_name(cv);
+-	auto key = build_key(cv);
+-	auto target = std::format("/download/symbols/{}/{}/{}", name, key, name);
+-
+-	LOG_INFO("downloading {} from symbol server...", name);
+-
+-	try
+-	{
+-		auto data = https_get("msdl.microsoft.com", target);
+-		if (data.empty())
+-		{
+-			LOG_WARN("failed to download {}", name);
+-			return {};
+-		}
+-
+-		std::filesystem::create_directories(dest.parent_path());
+-
+-		std::ofstream file(dest, std::ios::binary);
+-		file.write(reinterpret_cast<const char*>(data.data()), data.size());
+-
+-		if (!file.good())
+-		{
+-			std::filesystem::remove(dest);
+-			return {};
+-		}
+-	}
+-	catch (const std::exception& e)
+-	{
+-		LOG_WARN("download failed: {}", e.what());
+-		std::filesystem::remove(dest);
+-		return {};
+-	}
+-
+-	LOG_INFO("cached {} -> {}", name, dest.string());
+-	return dest;
+-}
+-
++inline std::filesystem::path download(const pe::codeview_rsds&) { return {}; }
+ } // namespace pdb_server
