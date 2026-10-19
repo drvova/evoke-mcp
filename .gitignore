@@ -1,0 +1,6 @@
+/build/
+/out/
+/.vs/
+/vcpkg_installed/
+*.user
+*.jsonl

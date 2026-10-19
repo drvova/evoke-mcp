@@ -1,3 +1,8 @@
+#pragma once
+
+#include <Windows.h>
+#include <winioctl.h>
+
 using i8 = char;
 using i16 = short;
 using i32 = int;
