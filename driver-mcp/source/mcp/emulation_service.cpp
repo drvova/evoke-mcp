@@ -1,4 +1,7 @@
 #include "emulation_service.hpp"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <unicorn/unicorn.h>
 #include <unicorn/x86.h>
 
