@@ -223,6 +223,9 @@ namespace mcp_runtime {
             try { audit_(record); }
             catch (...) { return finish("audit_unavailable_no_write"); }
         }
+        // Disk I/O in the audit sink may block long enough to expire a preview.
+        if (now_() >= plan.expires) return finish("patch_expired");
+        if (backend_.identity() != plan.target) return finish("target_changed");
         record["write_attempted"] = true;
         if (!backend_.write(plan.address, plan.after.data(), plan.after.size()))
             return finish("driver_write_failed"); // A failing driver may still have partially written.

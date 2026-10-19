@@ -164,6 +164,13 @@ namespace {
           auto p=record(service.prepare({{"addr",65536},{"type","u8"},{"value",20}}));
           auto r=service.apply({{"patch_id",p.at("patch_id")}}); status(r,"verified",true);
           check(record(r).at("verified")==true && record(r).contains("audit_error"),"audit failure does not hide completed write"); }
+        { fake_backend b; memory_service::clock::time_point time{};
+          memory_service service(b,[] {return "id";}, [&](const json& entry) {
+              if(entry.at("status")=="apply_started") time+=std::chrono::seconds(60);
+          }, [&] {return time;});
+          auto p=record(service.prepare({{"addr",65536},{"type","u8"},{"value",20}}));
+          status(service.apply({{"patch_id",p.at("patch_id")}}),"patch_expired");
+          check(b.writes==0,"expiry during audit blocks write"); }
         { fixture f; auto p=f.prepare(); auto q=f.prepare(30); json a,b;
           std::thread first([&] { a=f.apply(p); }); std::thread second([&] { b=f.apply(q); }); first.join(); second.join();
           check(f.backend.writes==1,"competing patches serialized");
