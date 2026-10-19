@@ -1,6 +1,6 @@
     json execute_image(const json& args) {
-        fields(args,{"image_hex","kind","base_address","entry_rva","arguments","registers","watch","syscalls","syscall_stubs_hex","instruction_limit","trace_limit","execution_timeout_ms","timeout_ms"});
-        const auto raw=decode(args.at("image_hex").get<std::string>(),2*1024*1024);
+        fields(args,{"image_hex","image_path","kind","base_address","entry_rva","arguments","registers","watch","syscalls","syscall_stubs_hex","syscall_stubs_path","instruction_limit","trace_limit","execution_timeout_ms","timeout_ms"});
+        const auto raw=image_input(args,"image_hex","image_path",2*1024*1024);
         evoke_pe::image image(raw);
         auto bounded=[&](const char* key,unsigned fallback,unsigned max) {
             const auto n=args.contains(key)?number(args.at(key)):fallback;
@@ -58,8 +58,8 @@
             if(services.size()>512)throw std::invalid_argument("too_many_syscall_mappings");
         };
         std::size_t unsupported_stubs=0;
-        if(args.contains("syscall_stubs_hex")) {
-            const evoke_pe::image stubs(decode(args.at("syscall_stubs_hex").get<std::string>(),1024*1024),false);
+        if(args.contains("syscall_stubs_hex")||args.contains("syscall_stubs_path")) {
+            const evoke_pe::image stubs(image_input(args,"syscall_stubs_hex","syscall_stubs_path",4*1024*1024),false);
             for(const auto& exp:stubs.exports())if(exp.name.starts_with("Nt")) {
                 const auto id=state.syscalls->decode_id(std::span<const std::uint8_t>(stubs.bytes).subspan(exp.rva));
                 if(!id)continue;
@@ -148,7 +148,7 @@
         for(const auto& w:watches) {std::vector<std::uint8_t> after(w.size);space->read_mem(base+w.rva,after.data(),after.size());watch.push_back({{"rva",w.rva},{"before_hex",encode(w.before)},{"after_hex",encode(after)}});}
         for(const auto& [name,id]:registers)regs[name]=hex(cpu->reg(id));regs["rip"]=hex(cpu->pc());
         for(const auto& [id,s]:services)mapping.push_back({{"id",id},{"module",s.module},{"name",s.name},{"source",s.source}});
-        return {{"status",status},{"source","kernemul"},{"kind",kind},{"image_base",hex(base)},{"entry_rva",entry},{"entry_return_value",hex(conv->read_ret(*cpu))},
+        return {{"status",status},{"source","kernemul"},{"image_source",args.contains("image_path")?"host_file":"supplied_hex"},{"kind",kind},{"image_base",hex(base)},{"entry_rva",entry},{"entry_return_value",hex(conv->read_ret(*cpu))},
             {"registers",regs},{"watch",watch},{"imports",resolved_imports},{"api_trace",trace},{"instruction_trace",instructions},{"instructions_observed",engine.observed()},
             {"trace_truncated",engine.observed()>trace_limit},{"fault_address",hex(event.fault_address)},{"interrupt",event.interrupt},
             {"syscall_mapping",mapping},{"unsupported_stub_exports",unsupported_stubs},{"numeric_syscall_dispatch",true},{"live_system_modified",false},

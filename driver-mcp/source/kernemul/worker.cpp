@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <charconv>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -45,6 +46,20 @@ std::vector<std::uint8_t> decode(const std::string& text,std::size_t maximum=163
     auto nibble=[](char c)->unsigned {if(c>='0'&&c<='9')return c-'0';if(c>='a'&&c<='f')return c-'a'+10;if(c>='A'&&c<='F')return c-'A'+10;throw std::invalid_argument("invalid_buffer_hex");};
     for (std::size_t i=0;i<text.size();i+=2) data.push_back(static_cast<std::uint8_t>(nibble(text[i])*16+nibble(text[i+1])));
     return data;
+}
+std::vector<std::uint8_t> image_input(const json& args,const char* hex_key,const char* path_key,std::size_t maximum) {
+    if(args.contains(hex_key)==args.contains(path_key))throw std::invalid_argument("provide_exactly_one_image_input");
+    if(args.contains(hex_key))return decode(args.at(hex_key).get<std::string>(),maximum);
+    const auto text=args.at(path_key).get<std::string>();
+    if(text.empty()||text.size()>4096||text.find('\0')!=std::string::npos)throw std::invalid_argument("invalid_image_path");
+    const auto path=std::filesystem::u8path(text);
+    if(!std::filesystem::is_regular_file(path))throw std::invalid_argument("image_path_not_regular_file");
+    const auto length=std::filesystem::file_size(path);if(length>maximum)throw std::invalid_argument("image_file_too_large");
+    std::ifstream file(path,std::ios::binary);std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+    file.read(reinterpret_cast<char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
+    if(!file||file.gcount()!=static_cast<std::streamsize>(bytes.size())||file.peek()!=std::char_traits<char>::eof())
+        throw std::runtime_error("image_file_read_failed_or_changed");
+    return bytes;
 }
 std::string encode(const std::vector<std::uint8_t>& data) {
     constexpr char digits[]="0123456789abcdef"; std::string out;out.reserve(data.size()*2);
@@ -223,9 +238,9 @@ int process_request(const std::filesystem::path& input_path,const std::filesyste
     auto sink=std::make_shared<log_sink>();auto logger=std::make_shared<spdlog::logger>("kernemul",sink);spdlog::set_default_logger(logger);
     json out;
     try {
-        if(std::filesystem::file_size(input_path)>8*1024*1024)throw std::invalid_argument("invalid_worker_input");
+        if(std::filesystem::file_size(input_path)>16*1024*1024)throw std::invalid_argument("invalid_worker_input");
         std::ifstream input(input_path,std::ios::binary);std::string text((std::istreambuf_iterator<char>(input)),{});
-        if(!input||text.size()>8*1024*1024)throw std::invalid_argument("invalid_worker_input");
+        if(!input||text.size()>16*1024*1024)throw std::invalid_argument("invalid_worker_input");
         const auto request=json::parse(text);fields(request,{"action","arguments"});runtime machine;
         const auto action=request.at("action").get<std::string>();
         if(action=="catalog")out=machine.catalog(request.at("arguments"));

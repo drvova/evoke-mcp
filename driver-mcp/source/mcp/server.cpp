@@ -50,9 +50,16 @@ namespace mcp_runtime {
         auto image_registers = register_schema;
         image_registers["properties"].erase("fs_base");image_registers["properties"].erase("gs_base");
         for (auto& property : image_registers["properties"].items()) property.value() = image_argument;
+        auto image_schema = [&](json properties) {
+            auto value = schema(std::move(properties), json::array());
+            value["oneOf"] = json::array({{{"required", {"image_hex"}}}, {{"required", {"image_path"}}}});
+            value["not"] = {{"required", {"syscall_stubs_hex", "syscall_stubs_path"}}};
+            return value;
+        };
         tools_ = {
             {"emulate_windows_image", "Load and execute a supplied AMD64 PE entry point or routine in the bounded KernEmul guest. Resolve named imports to original handlers; trap numeric syscalls using explicit mappings or matching supplied ntdll stubs. Return registers, traces and watched guest bytes. DriverEntry gets modeled driver arguments. No native image loading or live-driver execution; unsupported imports/features stop explicitly.",
-                schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                image_schema({{"image_hex", {{"type", "string"}, {"minLength", 128}, {"maxLength", 4194304}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                    {"image_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}, {"description", "Server-local regular PE file; mutually exclusive with image_hex. Read inside the bounded worker."}}},
                     {"kind", {{"type", "string"}, {"enum", json::array({"driver", "application"})}, {"default", "driver"}}},
                     {"base_address", emulation_integer}, {"entry_rva", {{"type", "integer"}, {"minimum", 0}, {"maximum", 16777215}}},
                     {"arguments", {{"type", "array"}, {"maxItems", 16}, {"items", image_argument}}}, {"registers", image_registers},
@@ -63,12 +70,13 @@ namespace mcp_runtime {
                         {"id", {{"type", "integer"}, {"minimum", 0}, {"maximum", 4294967295ULL}}},
                         {"module", {{"type", "string"}, {"default", "ntoskrnl.exe"}}}, {"name", {{"type", "string"}, {"minLength", 1}, {"maxLength", 128}}}
                     }, {"id", "name"})}}},
-                    {"syscall_stubs_hex", {{"type", "string"}, {"maxLength", 2097152}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
+                    {"syscall_stubs_path", {{"type", "string"}, {"minLength", 1}, {"maxLength", 4096}}},
+                    {"syscall_stubs_hex", {{"type", "string"}, {"maxLength", 8388608}, {"pattern", "^([0-9a-fA-F]{2})+$"}}},
                     {"instruction_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 100000}, {"default", 10000}}},
                     {"trace_limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 512}, {"default", 128}}},
                     {"execution_timeout_ms", {{"type", "integer"}, {"minimum", 1}, {"maximum", 1000}, {"default", 100}}},
                     {"timeout_ms", {{"type", "integer"}, {"minimum", 100}, {"maximum", 10000}, {"default", 3000}}}
-                }, {"image_hex"}), true,
+                }), true,
                 [this](const json& args) { return windows_.image(args); }},
             {"get_windows_emulation_info", "Report the bundled KernEmul Windows handler runtime, bounds, invocation mode and limitations. No live system or driver operations.",
                 schema(json::object(), json::array()), true,

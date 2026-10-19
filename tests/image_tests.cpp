@@ -2,6 +2,8 @@
 #include "pe_fixture.hpp"
 #include <iostream>
 #include <stdexcept>
+#include <fstream>
+#include <chrono>
 using namespace mcp_runtime;
 namespace {
 int assertions=0;
@@ -67,6 +69,27 @@ void relocation_and_limits(windows_service& s) {
     args["watch"]=json::array({{{"rva",4096},{"size",1}}});out=run(s,args,"memory_fault");
     check(out.at("watch")[0].at("after_hex")=="48","PE text section write protection enforced");
 }
+void files(windows_service& s) {
+    const auto tag=std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+    const auto dir=std::filesystem::temp_directory_path()/(std::filesystem::path(u8"evoke-pe-\u6d4b\u8bd5-").native()+std::filesystem::path(tag).native());
+    std::filesystem::create_directory(dir);
+    struct cleanup {std::filesystem::path path;~cleanup(){std::error_code ec;std::filesystem::remove_all(path,ec);}} cleanup_dir{dir};
+    const auto image_path=dir/"guest.exe",stub_path=dir/"ntdll.dll";
+    auto write=[](const std::filesystem::path& path,const pe_fixture::bytes& bytes){std::ofstream f(path,std::ios::binary);f.write(reinterpret_cast<const char*>(bytes.data()),static_cast<std::streamsize>(bytes.size()));};
+    auto path_text=[](const std::filesystem::path& path){const auto u8=path.u8string();return std::string(u8.begin(),u8.end());};
+    write(image_path,pe_fixture::syscall());auto stubs=pe_fixture::stubs();stubs.resize(3*1024*1024);write(stub_path,stubs);
+    json args={{"image_path",path_text(image_path)},{"syscall_stubs_path",path_text(stub_path)},{"kind","application"},{"timeout_ms",10000}};
+    auto out=run(s,args);check(out.at("image_source")=="host_file","Unicode server-local paths load in worker");
+    check(out.at("api_trace")[0].at("name")=="NtQuerySystemTime","larger on-disk ntdll stubs route syscalls");
+    args["syscall_stubs_hex"]=pe_fixture::hex(stubs);args.erase("syscall_stubs_path");out=run(s,args);
+    check(out.at("api_trace")[0].at("syscall_id")==119,"large inline stub request fits bounded image envelope");
+    args["image_hex"]=pe_fixture::hex(pe_fixture::syscall());out=run(s,args,"worker_error");
+    check(out.at("error")=="provide_exactly_one_image_input","ambiguous input rejected");
+    args.erase("image_hex");args["syscall_stubs_path"]=path_text(stub_path);out=run(s,args,"worker_error");
+    check(out.at("error")=="provide_exactly_one_image_input","ambiguous stub input rejected");
+    args.erase("syscall_stubs_hex");args["image_path"]=path_text(dir);out=run(s,args,"worker_error");
+    check(out.at("error")=="image_path_not_regular_file","directories rejected as image inputs");
+}
 void invalid_images(windows_service& s) {
     auto b=pe_fixture::image({0xc3});pe_fixture::put<std::uint32_t>(b,60,0xfffffff0);auto out=run(s,request(b),"worker_error");
     check(out.at("error")=="pe_truncated_structure","malformed header bounds checked");
@@ -77,4 +100,4 @@ void invalid_images(windows_service& s) {
     out=run(s,args,"worker_error");check(out.at("error")=="conflicting_syscall_mapping","conflicting build-specific syscall maps rejected");
 }
 }
-int main(){try{windows_service service;loading(service);imports(service);syscalls(service);relocation_and_limits(service);invalid_images(service);std::cout<<assertions<<" PE and syscall assertions passed\n";return 0;}catch(const std::exception& e){std::cerr<<"FAIL after "<<assertions<<": "<<e.what()<<'\n';return 1;}}
+int main(){try{windows_service service;loading(service);imports(service);syscalls(service);relocation_and_limits(service);files(service);invalid_images(service);std::cout<<assertions<<" PE and syscall assertions passed\n";return 0;}catch(const std::exception& e){std::cerr<<"FAIL after "<<assertions<<": "<<e.what()<<'\n';return 1;}}

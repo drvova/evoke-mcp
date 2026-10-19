@@ -26,7 +26,7 @@ public:
     std::vector<std::uint8_t> bytes;std::vector<section> sections;
     std::uint64_t preferred_base=0;std::uint32_t entry=0,header_size=0;
     explicit image(std::span<const std::uint8_t> raw,bool executable=true) {
-        if(raw.size()>2*1024*1024||raw.size()<64||get<std::uint16_t>(raw,0)!=0x5a4d)throw std::invalid_argument("invalid_pe_dos_header");
+        if(raw.size()>(executable?2u:4u)*1024*1024||raw.size()<64||get<std::uint16_t>(raw,0)!=0x5a4d)throw std::invalid_argument("invalid_pe_dos_header");
         const auto nt=get<std::uint32_t>(raw,60);
         if(get<std::uint32_t>(raw,nt)!=0x4550||get<std::uint16_t>(raw,std::size_t(nt)+4)!=0x8664)throw std::invalid_argument("pe_requires_amd64");
         const auto count=get<std::uint16_t>(raw,std::size_t(nt)+6),optional_size=get<std::uint16_t>(raw,std::size_t(nt)+20);

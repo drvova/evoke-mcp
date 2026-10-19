@@ -12,6 +12,11 @@ int main() {
         }
         std::vector<pe_fixture::bytes> seeds={base,pe_fixture::stubs()};
         auto imported=base;pe_fixture::imported(imported,"ntoskrnl.exe","NtClose");seeds.push_back(imported);
+        auto large=seeds[1];large.resize(3*1024*1024);
+        if(evoke_pe::image(large,false).exports().size()!=1)throw std::logic_error("large stub image rejected");
+        large.resize(4*1024*1024+1);bool too_large=false;
+        try{evoke_pe::image p(large,false);}catch(const std::invalid_argument&){too_large=true;}
+        if(!too_large)throw std::logic_error("stub image size cap not enforced");
         for(unsigned iteration=0;iteration<4000;++iteration) {
             auto mutated=seeds[iteration%seeds.size()];
             for(unsigned n=0;n<1+iteration%8;++n)mutated[random()%mutated.size()]=static_cast<std::uint8_t>(random());

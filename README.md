@@ -188,7 +188,7 @@ The tool accepts:
 
 | Argument | Meaning |
 | --- | --- |
-| `image_hex` | Raw PE32+ AMD64 file bytes as hex, up to 2 MiB; mapped image up to 16 MiB. |
+| `image_hex` / `image_path` | Exactly one: raw PE32+ AMD64 file bytes as hex or a server-local regular-file path. Up to 2 MiB; mapped image up to 16 MiB. |
 | `kind` | `driver` (default) or `application`; chooses guest process/context. |
 | `base_address` | Optional page-aligned canonical guest address; defaults to PE ImageBase. Moving an image requires relocations. |
 | `entry_rva` | Optional executable RVA for a selected routine; defaults to the PE entry. |
@@ -196,7 +196,7 @@ The tool accepts:
 | `registers` | Optional general-purpose register values using the same scalar/image-pointer forms. |
 | `watch` | Up to eight `{rva, size}` ranges, at most 4096 bytes each, returning before/after guest bytes. |
 | `syscalls` | Up to 512 explicit `{id, name, module?}` mappings; module defaults to `ntoskrnl.exe`. Names must be known `Nt` handlers. |
-| `syscall_stubs_hex` | Optional matching `ntdll.dll` PE bytes (up to 1 MiB), used to decode exported Nt service IDs. |
+| `syscall_stubs_hex` / `syscall_stubs_path` | Optional matching `ntdll.dll` PE bytes or server-local path (up to 4 MiB), used to decode exported Nt service IDs. Choose one source. |
 | `instruction_limit` | 1–100,000, default 10,000, across all resumed execution. |
 | `trace_limit` | 1–512, default 128. |
 | `execution_timeout_ms` | Guest execution/handler deadline, 1–1000 ms, default 100. |
@@ -210,7 +210,27 @@ reports `entry_return_value`, registers, instruction trace, API trace, imports,
 watched bytes, stop status, and the effective syscall map. A completed entry can
 return a failing NTSTATUS; inspect the raw value.
 
-For an agent with access to a driver's file bytes, construct a normal MCP call:
+For a local agent, paths avoid copying binary contents into tool arguments:
+
+```json
+{
+  "name": "emulate_windows_image",
+  "arguments": {
+    "image_path": "C:\\work\\my-driver.sys",
+    "kind": "driver",
+    "syscall_stubs_path": "C:\\Windows\\System32\\ntdll.dll"
+  }
+}
+```
+
+Paths resolve on the MCP server's machine (relative paths use its working
+directory). The worker reads regular files under the same memory/time bounds;
+Unicode paths are supported. Reads are explicit and read-only. Supply stubs for
+the build the guest code expects; the host's ntdll is appropriate when it matches
+that build. Neither file is loaded as host executable code. Omit syscall stubs if
+the image only uses modeled imports. Inline bytes remain available for remote
+clients or an agent with access to the file bytes:
+
 
 ```python
 from pathlib import Path
@@ -252,8 +272,8 @@ or synchronous guest callback execution. Pending waits stop with
 `guest_scheduling_required`; synchronous guest callbacks report a handler error.
 Unsupported upstream branches remain visible through returns and diagnostics.
 
-The image tool has an 8 MiB worker-request cap and uses the same bounded worker
-process and 1 MiB response limit as named batches. HTTP accepts at most 8 MiB;
+The image tool has a 16 MiB worker-request cap and uses the same bounded worker
+process and 1 MiB response limit as named batches. HTTP accepts at most 16 MiB;
 other Windows-operation requests retain their 128 KiB cap. The raw-code emulator
 retains its smaller code/mapping limits. All image memory and handler effects are
 guest-only; live-driver tools remain explicit separate operations.
