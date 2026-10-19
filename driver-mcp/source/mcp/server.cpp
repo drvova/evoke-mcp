@@ -40,7 +40,40 @@ namespace mcp_runtime {
         auto register_schema = emulation_registers;
         for (auto name : {"rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rflags", "fs_base", "gs_base"})
             register_schema["properties"][name] = emulation_integer;
+        const auto buffer_ref = schema({{"buffer", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+            {"offset", emulation_integer}}, {"buffer"});
+        const json operation_argument = {{"oneOf", json::array({emulation_integer, buffer_ref,
+            schema({{"result", {{"type", "integer"}, {"minimum", 0}, {"maximum", 63}}}}, {"result"}),
+            schema({{"read_u64", buffer_ref}}, {"read_u64"})})}};
         tools_ = {
+            {"get_windows_emulation_info", "Report the bundled KernEmul Windows handler runtime, bounds, invocation mode and limitations. No live system or driver operations.",
+                schema(json::object(), json::array()), true,
+                [this](const json& args) { return windows_.info(args); }},
+            {"list_windows_operations", "Enumerate actual registered KernEmul implementations across kernel modules, including Nt/Zw syscall handlers. Returns argument counts, provenance, exact runtime counts and pagination. Does not imply complete native fidelity.",
+                schema({{"module", {{"type", "string"}}}, {"name", {{"type", "string"}}},
+                    {"syscalls_only", {{"type", "boolean"}}}, {"offset", {{"type", "integer"}, {"minimum", 0}}},
+                    {"limit", {{"type", "integer"}, {"minimum", 1}, {"maximum", 200}, {"default", 100}}}}, json::array()), true,
+                [this](const json& args) { return windows_.catalog(args); }},
+            {"emulate_windows_operations", "Execute named original KernEmul handlers in a fresh Windows guest model, preserving guest state across up to 64 operations. Supports buffers, prior results and guest handle references; returns effects, raw return values and upstream diagnostics. Nt/Zw calls use their names, without numeric syscall dispatch or PE execution. Guest state only; no live-driver access.",
+                schema({{"context", {{"type", "string"}, {"enum", json::array({"kernel", "user"})}, {"default", "kernel"}}},
+                    {"timeout_ms", {{"type", "integer"}, {"minimum", 100}, {"maximum", 10000}, {"default", 3000}}},
+                    {"buffers", {{"type", "array"}, {"maxItems", 32}, {"items", schema({
+                        {"id", {{"type", "string"}, {"minLength", 1}, {"maxLength", 64}}},
+                        {"bytes_hex", {{"type", "string"}, {"maxLength", 32768}, {"pattern", "^([0-9a-fA-F]{2})*$"}}},
+                        {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 16384}}}
+                    }, {"id"})}}},
+                    {"operations", {{"type", "array"}, {"minItems", 1}, {"maxItems", 64}, {"items", schema({
+                        {"module", {{"type", "string"}, {"default", "ntoskrnl.exe"}}}, {"name", {{"type", "string"}}},
+                        {"arguments", {{"type", "array"}, {"maxItems", 16}, {"items", operation_argument}}}
+                    }, {"name", "arguments"})}}},
+                    {"patches", {{"type", "array"}, {"maxItems", 64}, {"items", schema({
+                        {"buffer", {{"type", "string"}}}, {"offset", emulation_integer}, {"value", operation_argument}
+                    }, {"buffer", "offset", "value"})}}},
+                    {"reads", {{"type", "array"}, {"maxItems", 16}, {"items", schema({
+                        {"address", operation_argument}, {"size", {{"type", "integer"}, {"minimum", 1}, {"maximum", 16384}}}
+                    }, {"address", "size"})}}}
+                }, {"operations"}), true,
+                [this](const json& args) { return windows_.run(args); }},
             {"list_api_models", "List named emulated APIs and Windows host-snapshot bridges, with signatures, supported modules, availability, provenance, and fidelity limits. This is an explicit subset, not all Windows APIs.",
                 schema({{"module", {{"type", "string"}}}, {"name", {{"type", "string"}}}}, json::array()), true,
                 [this](const json& args) { return emulation_.api_catalog(args); }},
@@ -134,7 +167,7 @@ namespace mcp_runtime {
                 return error(id, -32602, "protocol_version_required");
             return result(id, {{"protocolVersion", "2025-03-26"},
                 {"capabilities", {{"tools", json::object()}}},
-                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.3.0"}}}});
+                {"serverInfo", {{"name", "evoke-mcp"}, {"version", "2.4.0"}}}});
         }
         if (method == "tools/list") {
             auto list = json::array();

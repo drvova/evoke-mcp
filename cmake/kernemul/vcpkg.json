@@ -1,0 +1,5 @@
+{
+  "name": "evoke-kernemul-system-deps",
+  "version-string": "2.4.0",
+  "dependencies": ["openssl"]
+}

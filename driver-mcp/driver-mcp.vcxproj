@@ -161,6 +161,7 @@
     <ClCompile Include="source\mcp\memory_service.cpp" />
     <ClCompile Include="source\mcp\api_models.cpp" />
     <ClCompile Include="source\mcp\host_system.cpp" />
+    <ClCompile Include="source\mcp\windows_service.cpp" />
     <ClCompile Include="source\mcp\emulation_service.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -173,6 +174,7 @@
     <ClInclude Include="source\mcp\memory_service.hpp" />
     <ClInclude Include="source\mcp\api_models.hpp" />
     <ClInclude Include="source\mcp\host_system.hpp" />
+    <ClInclude Include="source\mcp\windows_service.hpp" />
     <ClInclude Include="source\mcp\emulation_service.hpp" />
     <ClInclude Include="source\mcp\http_security.hpp" />
     <ClInclude Include="source\mcp\routines\type_dispatch.hpp" />
@@ -181,6 +183,20 @@
     <ClInclude Include="source\mcp\server.hpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="BuildKernEmulWorker" BeforeTargets="ClCompile" Condition="'$(Platform)'=='x64'">
+    <PropertyGroup>
+      <EvokeRepository>$([System.IO.Path]::GetFullPath('$(MSBuildProjectDirectory)\..'))</EvokeRepository>
+      <EvokeWorkerBuild>$(EvokeRepository)\out\kernemul</EvokeWorkerBuild>
+      <EvokeToolchain Condition="Exists('$(VcpkgRoot)scripts\buildsystems\vcpkg.cmake')">-DCMAKE_TOOLCHAIN_FILE=&quot;$(VcpkgRoot)scripts\buildsystems\vcpkg.cmake&quot;</EvokeToolchain>
+    </PropertyGroup>
+    <Exec Command="cmake -S &quot;$(EvokeRepository)&quot; -B &quot;$(EvokeWorkerBuild)&quot; -A x64 $(EvokeToolchain) -DVCPKG_MANIFEST_DIR=&quot;$(EvokeRepository)\cmake\kernemul&quot;" />
+    <Exec Command="cmake --build &quot;$(EvokeWorkerBuild)&quot; --config $(Configuration) --target evoke-kernemul --parallel 2" />
+    <ItemGroup>
+      <EvokeWorkerFiles Include="$(EvokeWorkerBuild)\$(Configuration)\evoke-kernemul.exe;$(EvokeWorkerBuild)\$(Configuration)\*.dll" />
+    </ItemGroup>
+    <MakeDir Directories="$(OutDir)" />
+    <Copy SourceFiles="@(EvokeWorkerFiles)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>

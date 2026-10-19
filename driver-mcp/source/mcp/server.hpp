@@ -6,6 +6,7 @@
 #include "common.hpp"
 #include "memory_service.hpp"
 #include "emulation_service.hpp"
+#include "windows_service.hpp"
 
 namespace mcp_runtime {
     class mcp_server {
@@ -15,6 +16,7 @@ namespace mcp_runtime {
 
     private:
         emulation_service emulation_;
+        windows_service windows_;
         std::vector<tool_definition> tools_;
         std::unordered_map<std::string, tool_function> handlers_;
     };

@@ -309,11 +309,21 @@ namespace {
         check(call({{"jsonrpc","2.0"},{"id",1},{"method","bad"}}).at("error").at("code")==-32601,"unknown method code");
         check(!server.handle({{"jsonrpc","2.0"},{"method","tools/call"},{"params",{{"name","apply_memory_patch"}}}}),"notifications do not execute tools");
         const auto tools=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/list"}}).at("result").at("tools");
-        check(tools.size()==16,"memory and management tools registered");
+        check(tools.size()==19,"memory and management tools registered");
         for(const auto& tool:tools) check(tool.at("name")!="write_memory","blind writes removed");
         auto emulated=call({{"jsonrpc","2.0"},{"id",2},{"method","tools/call"},
             {"params",{{"name","emulate_region"},{"arguments",{{"code_hex","4889c84801d0c3"},{"registers",{{"rcx",7},{"rdx",35}}}}}}}});
         check(emulated.at("result").at("structuredContent").at("registers").at("rax")=="0x2a","built-in emulator reachable through MCP");
+        auto windows=call({{"jsonrpc","2.0"},{"id",3},{"method","tools/call"},
+            {"params",{{"name","list_windows_operations"},{"arguments",{{"name","NtQuerySystemTime"}}}}}});
+        check(windows.at("result").at("structuredContent").at("filtered_total")==1,"upstream discovery reachable through MCP");
+        windows=call({{"jsonrpc","2.0"},{"id",4},{"method","tools/call"},
+            {"params",{{"name","emulate_windows_operations"},{"arguments",{
+                {"buffers",json::array({{{"id","time"},{"size",8}}})},
+                {"operations",json::array({{{"name","NtQuerySystemTime"},{"arguments",json::array({{{"buffer","time"}}})}}})}
+            }}}}});
+        check(windows.at("result").at("isError")==false,"upstream handler executes through MCP");
+        check(windows.at("result").at("structuredContent").at("operation_trace")[0].at("source")=="kernemul","MCP preserves upstream provenance");
         check(f.backend.reads==0 && f.backend.writes==0,"emulation does not touch live backend");
         auto r=call({{"jsonrpc","2.0"},{"id",1},{"method","tools/call"},
             {"params",{{"name","prepare_memory_patch"},{"arguments",{{"addr",65536},{"type","u8"},{"value",256}}}}}});

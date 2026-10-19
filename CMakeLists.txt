@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(evoke_mcp VERSION 2.3.0 LANGUAGES C CXX)
+project(evoke_mcp VERSION 2.4.0 LANGUAGES C CXX)
 
 if(POLICY CMP0135)
     cmake_policy(SET CMP0135 NEW)
@@ -17,18 +17,17 @@ set(UNICORN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(UNICORN_INSTALL OFF CACHE BOOL "" FORCE)
 set(UNICORN_LEGACY_STATIC_ARCHIVE OFF CACHE BOOL "" FORCE)
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(unicorn
-    URL https://codeload.github.com/unicorn-engine/unicorn/tar.gz/refs/tags/2.1.4
-    URL_HASH SHA256=ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4)
-FetchContent_MakeAvailable(unicorn)
 find_package(Threads REQUIRED)
+include(cmake/kernemul.cmake)
 
 add_library(evoke_core
     driver-mcp/source/mcp/server.cpp
     driver-mcp/source/mcp/memory_service.cpp
     driver-mcp/source/mcp/emulation_service.cpp
     driver-mcp/source/mcp/api_models.cpp
-    driver-mcp/source/mcp/host_system.cpp)
+    driver-mcp/source/mcp/host_system.cpp
+    driver-mcp/source/mcp/windows_service.cpp)
+add_dependencies(evoke_core evoke-kernemul)
 target_compile_features(evoke_core PUBLIC cxx_std_20)
 target_compile_definitions(evoke_core PUBLIC $<$<PLATFORM_ID:Windows>:NOMINMAX>)
 target_include_directories(evoke_core PUBLIC driver-mcp/source/mcp)
@@ -51,6 +50,10 @@ if(BUILD_TESTING)
     add_executable(emulation_tests tests/emulation_tests.cpp)
     target_link_libraries(emulation_tests PRIVATE evoke_core)
     add_test(NAME emulation_tests COMMAND emulation_tests)
+    add_executable(windows_tests tests/windows_tests.cpp)
+    target_link_libraries(windows_tests PRIVATE evoke_core)
+    add_test(NAME windows_tests COMMAND windows_tests)
+    set_tests_properties(windows_tests PROPERTIES TIMEOUT 120)
     add_executable(api_tests tests/api_tests.cpp)
     target_link_libraries(api_tests PRIVATE evoke_core)
     add_test(NAME api_tests COMMAND api_tests)

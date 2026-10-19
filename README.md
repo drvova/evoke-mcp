@@ -1,6 +1,6 @@
 # evoke-mcp
 
-A Windows x64 MCP server with built-in Unicorn emulation, driver management, and
+A Windows x64 MCP server with built-in Unicorn and KernEmul emulation, driver management, and
 typed memory access through a compatible local kernel driver. It exposes
 authenticated Streamable HTTP at `http://127.0.0.1:8888/mcp`.
 
@@ -86,10 +86,102 @@ runs in the MCP process and guest memory is separate from host memory; this is
 not an OS sandbox or a full-system virtual machine. See [third-party notices](THIRD_PARTY.md)
 for the required engine's licensing.
 
+## KernEmul Windows operations
+
+The required `evoke-kernemul` worker compiles the original Windows handler
+implementations from [noahware/kernemul](https://github.com/noahware/kernemul),
+pinned to `cf3aedc6cc1755d2fedad77dcd4671bf045f9de8`. Its runtime registers
+**618 operation names, including 157 Nt handlers and 157 Zw aliases**, across
+`ntoskrnl.exe`, `fltmgr.sys`, `cng.sys`, `ci.dll`, `ndis.sys`, `tbs.sys`, `tdi.sys`,
+and `win32k.sys`. These are registered names, not a claim of 618 independent,
+complete implementations. Categories include memory, processes, threads,
+synchronization, file I/O, registry, devices, security, and cryptography.
+
+This backend complements the small raw-code models below. It executes the upstream
+handlers with their shared guest object manager, memory manager, processes,
+threads, registry, filesystem, and device model. No Windows image download is
+needed for this image-free mode. The adapter changes registration/bootstrapping
+and disables automatic symbol downloads; it retains the original operation bodies.
+The registry and files start from upstream's synthetic boot state.
+
+- `get_windows_emulation_info` reports worker availability and execution limits.
+- `list_windows_operations` discovers the actual compiled handler registry, with
+  optional `module`, exact `name`, and `syscalls_only` filters. Pagination uses
+  `offset` and `limit` (default 100, maximum 200) and returns `next_offset`.
+  Entries expose argument counts, return-value presence, and provenance.
+- `emulate_windows_operations` executes up to 64 named calls in a fresh guest.
+  State is shared across operations in that request and discarded afterward.
+  Choose `context: "kernel"` (default) or `"user"`; virtual-memory syscalls that
+  require a user process use the user context. All arguments follow the Windows
+  x64 ABI; additional arguments such as varargs are allowed up to 16 total.
+
+For example, allocate guest pool memory, copy supplied bytes into it, and inspect
+those bytes through the original `MmCopyMemory` implementation:
+
+```json
+{
+  "name": "emulate_windows_operations",
+  "arguments": {
+    "buffers": [
+      { "id": "source", "bytes_hex": "01020304" },
+      { "id": "copied", "size": 8 }
+    ],
+    "operations": [
+      { "name": "ExAllocatePool2", "arguments": [64, 4, 1] },
+      { "name": "MmCopyMemory", "arguments": [
+        { "result": 0 }, { "buffer": "source" }, 4, 2, { "buffer": "copied" }
+      ] }
+    ],
+    "reads": [{ "address": { "result": 0 }, "size": 4 }]
+  }
+}
+```
+
+Arguments accept unsigned integers/hex strings, `{ "buffer": "id", "offset": 0 }`
+for guest pointers, `{ "result": 0 }` for an earlier non-void return value, or
+`{ "read_u64": { "buffer": "handle" } }` for an output handle/pointer. Use hex
+strings for full-width values, including `"0xffffffffffffffff"` for the current
+process pseudo-handle. Buffer IDs are unique; buffers are zero-filled beyond
+`bytes_hex`, and `size` may reserve more space. There are at most 32 buffers,
+16 KiB each and 64 KiB total.
+
+`patches` can relocate pointers inside structures before the first call:
+`{ "buffer": "unicode_string", "offset": 8, "value": { "buffer": "text" } }`
+writes a little-endian 64-bit pointer at that offset. Up to 64 patches are allowed;
+each must fit within its destination buffer. Buffers are allocated before patches,
+and reported `before_hex` includes these relocations. This lets clients construct
+structures such as `UNICODE_STRING` and `OBJECT_ATTRIBUTES`. Use the pinned
+upstream's x64 types and the operation's argument contract.
+
+Results include `operation_trace`, resolved arguments, raw `return_value` (null
+for void routines), before/after buffers, optional `reads` (at most 16, 16 KiB each,
+64 KiB total), bounded upstream `diagnostics`, and the exact revision. `handled`
+means the handler ran; inspect its return value for NTSTATUS failure and its
+warnings for approximations. Unknown operations, bad guest addresses and thrown
+handler errors are explicit errors. Earlier guest effects are not rolled back.
+
+Nt/Zw routines are invoked **by name**, using the same original handler bodies;
+this interface does not build an OS-specific numeric syscall table or execute PE
+images. It does not run the guest scheduler. Calls that move the current guest PC,
+sleep, wait, suspend, or finish the current thread stop with `guest_scheduling_required`.
+Guest callbacks, additional queued threads, and some image/global-dependent paths
+need further execution support. Upstream unsupported branches and approximations
+remain. This is not complete Windows compatibility.
+
+The worker is built by default and runs as a separate bounded process, with one
+active request per server, a default 3-second deadline (100–10,000 ms configurable),
+and a 128 KiB request / 1 MiB response cap. Timeout kills and reaps the worker.
+Windows uses a job object with a 2 GiB process-memory limit and one process; Linux
+uses a 2 GiB address-space limit plus CPU/output limits. These are resource limits,
+not an OS sandbox. Supplied operations receive guest addresses; they have no live
+MCP driver backend, automatic host filesystem import, or symbol-server downloads.
+The native Windows snapshot and explicit live-driver tools remain separate paths.
+
 ## Windows API models and real host data
 
-The MCP supports both guest models and native Windows queries through an explicit
-routing layer. This is **22 supported API models/bridges, not all Windows APIs**.
+The raw-code backend supports both guest models and native Windows queries through
+an explicit routing layer. It has **22 supported API models/bridges**; the separate
+KernEmul backend above provides the broader Windows operation runtime.
 No unknown function is automatically forwarded to the host. Windows user-mode
 APIs do not substitute for arbitrary kernel routines or a real driver's protocol.
 
@@ -281,30 +373,36 @@ neither is implemented by guessing new IOCTLs.
 
 ## Build
 
-Use CMake 3.20+, a C++20 compiler, and the Windows SDK / Visual Studio 2022 C++
-build tools. CMake downloads nlohmann JSON 3.12.0 from a pinned, SHA-256-verified
-archive, and builds the required Unicorn 2.1.4 engine from its own pinned,
-SHA-256-verified archive. Only the x86 architecture family is compiled. A C
-compiler is also required for Unicorn; there is no emulation-free build.
-`cpp-httplib` remains included in the repository.
+Use CMake 3.20+, Git, a C++23 compiler with `std::format` (GCC 14+ or current
+Visual Studio 2022), a C compiler, and OpenSSL development libraries. Windows also
+needs the Windows SDK. KernEmul and its patched Unicorn revision, JSON, spdlog,
+raw_pdb, the PE parser, and IA-32 definitions are downloaded at pinned revisions
+with SHA-256 verification; see `cmake/kernemul/dependencies.json`.
+Only the x86 architecture family is compiled. The worker is required, with no
+emulation-free build. `cpp-httplib` remains included in the repository.
+
+On Windows, use vcpkg's toolchain to provide OpenSSL, for example:
 
 ```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release
+cmake -S . -B build -A x64 `
+  -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  -DVCPKG_MANIFEST_DIR="$PWD/cmake/kernemul"
+cmake --build build --config Release --parallel 2
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-The executable is `build/Release/driver-mcp.exe`. The existing Visual Studio
-solution can also be built as **x64** after installing vcpkg and running
-`vcpkg integrate install`; `vcpkg.json` supplies nlohmann JSON and Unicorn (use a current vcpkg checkout
-with Unicorn 2.1.4). Win32 builds are
-unsupported because the driver protocol and process addresses require x64.
+Keep `build/Release/driver-mcp.exe`, `evoke-kernemul.exe`, and its OpenSSL runtime
+DLLs together. The worker is located beside the server executable, never through
+an agent-supplied executable path. The existing x64 Visual Studio solution also
+builds the worker with CMake and copies it beside the server; it requires CMake on
+PATH and vcpkg integration. Win32 builds are unsupported.
 
-The transaction core and mock-driver tests also build on Linux:
+On Linux (all core and Windows model tests run without a real driver):
 
 ```sh
+# Install GCC 14+ and the platform's OpenSSL development package first.
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
+cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure
 ```
 
@@ -316,7 +414,11 @@ invalidation. A separate suite executes real Unicorn instruction streams and
 checks arithmetic, calls/returns, high virtual addresses, guest memory writes,
 faults, external instructions, loop budgets, and strict input validation. A third
 suite tests API dispatch, guest pool state, named failures, provenance, snapshot
-bridges, and actual native Windows system queries in Windows CI. No suite
+bridges, and actual native Windows system queries in Windows CI. The Windows
+runtime suite executes original KernEmul handlers for pool allocation/copy,
+process/thread lookup, event signaling, registry create/set/query, guest file
+write/read, device creation, user virtual-memory allocation/free, and state
+isolation. No suite
 exercises a real kernel driver.
 
 ## Run and connect
